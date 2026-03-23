@@ -20,6 +20,11 @@ volatile bool RightTopButtonState = false;
 #define RightBottomButton eP8
 volatile bool RightBottomButtonState = false;
 
+#define TriacLight eP9
+volatile bool TriacLightState = true; // true because light is set to LOW on at startup, so the next toggle should turn it on.
+#define TriacFan eP10
+volatile bool TriacFanState = true; // true because fan is set to LOW on at startup, so the next toggle should turn it on.
+
 void ButtonTasks(void *pvParameters) {
   while (true) {
     LeftTopButtonState = digital_read(LeftTopButton);
@@ -40,6 +45,11 @@ void setup() {
     pinMode(LeftBottomButton, INPUT_PULLDOWN);
     pinMode(RightTopButton, INPUT_PULLDOWN);
     pinMode(RightBottomButton, INPUT_PULLDOWN);
+    pinMode(TriacLight, OUTPUT);
+    pinMode(TriacFan, OUTPUT);
+
+    digital_write(TriacLight, LOW);  // Ensure the light is off at startup
+    digital_write(TriacFan, LOW);    // Ensure the fan is off at startup
 
     k10.initScreen(screen_dir);
     k10.creatCanvas();                      //Create a canvas for drawing
@@ -56,7 +66,7 @@ void loop() {
     if(LeftTopButtonState){
         LeftTopButtonState = false;  //Reset the state to avoid repeated triggers
         k10.setScreenBackground(0xFFFFFF);      //Set background color to white
-        k10.canvas->canvasText("Left Top Pressed", 1, 0x000000);    //Display text in black color
+        k10.canvas->canvasText("AC Turned ON", 1, 0x000000);    //Display text in black color
         k10.canvas->updateCanvas();             //Update the canvas to reflect changes
         irsend.sendRaw(AC_ONrawData, 197, 38);  // Send a raw data capture at 38kHz.
         Serial.println("AC ON");  
@@ -64,7 +74,7 @@ void loop() {
     else if(LeftBottomButtonState){
         LeftBottomButtonState = false;  //Reset the state to avoid repeated triggers
         k10.setScreenBackground(0xADD8E6);      //Set background color to light blue
-        k10.canvas->canvasText("Left Bottom Pressed", 1, 0x000000);    //Display text in black color
+        k10.canvas->canvasText("AC Turned OFF", 1, 0x000000);    //Display text in black color
         k10.canvas->updateCanvas();             //Update the canvas to reflect changes
         irsend.sendRaw(AC_OFFrawData, 197, 38);  // Send a raw data capture at 38kHz.
         Serial.println("AC OFF");
@@ -72,13 +82,19 @@ void loop() {
     else if(RightTopButtonState){
         RightTopButtonState = false;  //Reset the state to avoid repeated triggers
         k10.setScreenBackground(0x800000);      //Set background color to Maroon
-        k10.canvas->canvasText("Right Top Pressed", 1, 0x000000);    //Display text in black color
+        k10.canvas->canvasText("Light Toggled", 1, 0x000000);    //Display text in black color
         k10.canvas->updateCanvas();             //Update the canvas to reflect changes
+        digital_write(TriacLight, TriacLightState?HIGH:LOW);  // Turn on the light
+        delay(10);
+        TriacLightState = !TriacLightState;  // Toggle the state for next press
       } 
     else if(RightBottomButtonState){
         RightBottomButtonState = false;  //Reset the state to avoid repeated triggers
         k10.setScreenBackground(0x90EE90);      //Set background color to light green
-        k10.canvas->canvasText("Right Bottom Pressed", 1, 0x000000);    //Display text in black color
+        k10.canvas->canvasText("Fan Toggled", 1, 0x000000);    //Display text in black color
         k10.canvas->updateCanvas();             //Update the canvas to reflect changes
-    }
+        digital_write(TriacFan, TriacFanState?HIGH:LOW);  // Turn on the fan
+        delay(10);
+        TriacFanState = !TriacFanState;  // Toggle the state for next press
+      }
 }
