@@ -2,6 +2,16 @@
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
 #include "asr.h"
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <ElegantOTA.h>
+
+//wifi connect
+const char* ssid = "Amin Residence GP";
+const char* password = "alamiralif86";
+WebServer server(80);
+unsigned long ota_progress_millis = 0;
 
 UNIHIKER_K10 k10;
 uint8_t screen_dir=2;
@@ -29,6 +39,7 @@ volatile bool RightBottomButtonState = false;
 volatile bool TriacLightState = true; // true because light is set to LOW on at startup, so the next toggle should turn it on.
 #define TriacFan eP10
 volatile bool TriacFanState = true; // true because fan is set to LOW on at startup, so the next toggle should turn it on.
+
 
 void ButtonTasks(void *pvParameters) {
   while (true) {
@@ -66,14 +77,38 @@ void VoiceTasks(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(100));  // Check every 100ms
   }
 }
+void OTATasks(void *pvParameters) {
+  while (true) {
+    server.handleClient();
+    ElegantOTA.loop();  // Handle OTA updates
+    vTaskDelay(pdMS_TO_TICKS(100));  // Check every 100ms
+  }
+}
 
 void setup() {
     k10.begin();
     Serial.begin(115200);
     irsend.begin();
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    Serial.println("Connecting to WiFi...");
+    // Wait for connection
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    //start OTA server
+    server.on("/", []() {
+      server.send(200, "text/plain", "Hi! type this to update: http://192.168.0.173/update");
+    });
+    ElegantOTA.begin(&server);    // Start ElegantOTA
+    server.begin();
+    Serial.println("HTTP server started");
     
     //setup voice
-    asr.asrInit(CONTINUOUS, EN_MODE, 5000);
+    asr.asrInit(0, EN_MODE, 5000);  //0: Once, 1: continuous
     while(asr._asrState == 0){
       Serial.println("Waiting for ASR to initialize...");
       delay(500);
@@ -96,7 +131,9 @@ void setup() {
 
     xTaskCreatePinnedToCore(ButtonTasks, "ButtonTasks", 2048, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(VoiceTasks, "VoiceTasks", 1024 * 6, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(OTATasks, "OTATasks", 1024 * 4, NULL, 10, NULL, 1);
   }
+
 
 void loop() {
     Serial.print(digital_read(LeftTopButton));  ///watch carefully this digital read is different!!
