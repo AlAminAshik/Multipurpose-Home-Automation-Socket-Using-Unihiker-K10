@@ -40,6 +40,7 @@ uint16_t AC_OFFrawData[197] = {6076,7334,614,1654,614,1656,614,1654,616,1652,612
 #define RightBottomButton eP8
 #define TriacLight        eP9
 #define TriacFan          eP10
+//#define BaclLED           eLCD_BLK
 
 // ── Page enum ─────────────────────────────────────────────────────────────────
 enum Page { PAGE_MAIN, PAGE_ALARM };
@@ -51,11 +52,14 @@ static volatile int  alarmMinute  = 0;
 static volatile bool alarmEnabled = false;
 static volatile bool alarmFired   = false;
 static volatile bool alarmRunning = false;
+// Local variable to track whether we already started the alarm sound
+static bool alarmSoundActive = false;
 
 // ── Shared appliance state ────────────────────────────────────────────────────
 static volatile bool TriacLightState = false;
 static volatile bool TriacFanState   = false;
 static volatile bool ACState         = false;
+static volatile bool backLightState  = false;
 
 // ── Semaphores / mutexes ──────────────────────────────────────────────────────
 static SemaphoreHandle_t stateMutex = NULL;  // protects appliance states + page
@@ -99,6 +103,46 @@ void toggleAC() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     ACState = newState;
     xSemaphoreGive(stateMutex);
+}
+
+
+// Helper – draws one appliance block
+// x, y = top-left corner, w/h = size, state = on/off, label = text
+void drawApplianceBlock(int x, int y, int w, int h, bool state, const char* label) {
+    uint16_t bgColor   = state ? 0x00CC44 : 0x555555;  // green / grey
+    uint16_t textColor = 0xFFFFFF;
+    k10.canvas->canvasRectangle(x, y, w, h, bgColor, bgColor, true);   // filled rect
+    // Centre the label inside the block
+    int textX = x + w / 2;
+    int textY = y + h / 2 - 8;   // nudge up slightly for visual centre
+    k10.canvas->canvasText(label, textX, textY, textColor,
+                           k10.canvas->eCNAndENFont16, strlen(label), true);
+}
+
+// Helper – draws a vertical bar gauge using pipe characters
+// x, y     = top-left of the bar area
+// value    = current reading
+// minVal, maxVal = scale range
+// label    = e.g. "Lux", "Hum", "Tmp"
+// unit     = e.g. "%", "C", ""
+// barHeight = total number of '|' characters at full scale
+void drawVerticalBar(int x, int y, float value, float minVal, float maxVal,
+                     const char* label, const char* unit, int barHeight = 10) {
+    // Clamp & compute how many filled bars
+    float clamped = constrain(value, minVal, maxVal);
+    int filled    = (int)roundf((clamped - minVal) / (maxVal - minVal) * barHeight);
+
+    // Draw label + numeric value above the bar
+    char header[20];
+    snprintf(header, sizeof(header), "%s:%.1f%s", label, value, unit);
+    k10.canvas->canvasText(header, x, y, 0xFFFFFF, k10.canvas->eCNAndENFont16, strlen(header), false);
+
+    // Build the bar string:  filled = '|',  empty = '.'
+    char bar[barHeight + 1];
+    for (int i = 0; i < barHeight; i++)
+        bar[i] = (i < filled) ? '|' : '.';
+    bar[barHeight] = '\0';
+    k10.canvas->canvasText(bar, x, y +18 , 0x00FF88, k10.canvas->eCNAndENFont24, barHeight, false);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,6 +286,20 @@ void VoiceTasks(void *pvParameters) {
             asr._isDetectCmdID = 0;
             toggleAC();
         }
+        else if (asr.isDetectCmdID(3+1)) {
+            asr._isDetectCmdID = 0;
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            currentPage = PAGE_ALARM;
+            xSemaphoreGive(stateMutex);
+            backgroundNeedsRedraw = true;
+        }
+        else if (asr.isDetectCmdID(4+1)) {
+            asr._isDetectCmdID = 0;
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            currentPage = PAGE_MAIN;
+            xSemaphoreGive(stateMutex);
+            backgroundNeedsRedraw = true;
+        }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -280,9 +338,21 @@ void UITasks(void *pvParameters) {
                 alarmRunning = true;
                 xSemaphoreGive(AlarmMutex);
                 aRunning = true;
-                music.playMusic(Melodies::BA_DING, OnceInBackground);
             }
         }
+        // Start looping sound when alarm begins
+        if (aRunning && !alarmSoundActive) {
+            music.playMusic(Melodies::ENTERTAINER, ForeverInBackground);  // loop until stopped
+            alarmSoundActive = true;
+        }
+
+        // Stop sound when alarm is dismissed (alarmRunning goes false via button)
+        if (!aRunning && alarmSoundActive) {
+            music.stopPlayAudio();          // stop the looping melody
+            music.stopPlayTone();           // stop any tone that might be playing
+            alarmSoundActive = false;
+        }
+
         // Reset alarmFired when minute advances past the alarm minute
         if (aFired && timeOk) {
             if (timeinfo.tm_hour != aHour || timeinfo.tm_min != aMin) {
@@ -319,22 +389,36 @@ void UITasks(void *pvParameters) {
         // DRAW: MAIN PAGE
         // ═════════════════════════════════════════════════════════════════
         if (page == PAGE_MAIN) {
-            k10.canvas->canvasText(lightOn ? "Light (ON)"  : "Light (OFF)", 3, 0xFFFFFF);
-            k10.canvas->canvasText(fanOn   ? "Fan   (ON)"  : "Fan   (OFF)", 4, 0xFFFFFF);
-            k10.canvas->canvasText(acOn    ? "AC    (ON)"  : "AC    (OFF)", 5, 0xFFFFFF);
+            // k10.canvas->canvasText(lightOn ? "Light (ON)"  : "Light (OFF)", 3, 0xFFFFFF);
+            // k10.canvas->canvasText(fanOn   ? "Fan   (ON)"  : "Fan   (OFF)", 4, 0xFFFFFF);
+            // k10.canvas->canvasText(acOn    ? "AC    (ON)"  : "AC    (OFF)", 5, 0xFFFFFF);
+            
+            // Three blocks side-by-side, 10 px gap, starting at y=45 (below the divider)
+            const int BX = 10, BY = 45, BW = 68, BH = 50, GAP = 6; // dimensions and gap for appliance blocks
+            drawApplianceBlock(BX + 0*(BW+GAP), BY, BW, BH, lightOn, "LIGHT");
+            drawApplianceBlock(BX + 1*(BW+GAP), BY, BW, BH, fanOn,   "FAN");
+            drawApplianceBlock(BX + 2*(BW+GAP), BY, BW, BH, acOn,    "AC");
 
             lightIntensity = k10.readALS();
-            k10.canvas->canvasText(("LightLux: " + String(lightIntensity)).c_str(), 6, 0xFFFFFF);
-
+            
             sensors_event_t humidity_event, temp_event;
             aht.getEvent(&humidity_event, &temp_event);
-            k10.canvas->canvasText(("Hum: "  + String(humidity_event.relative_humidity, 1) + " %").c_str(), 7, 0xFFFFFF);
-            k10.canvas->canvasText(("Temp: " + String(temp_event.temperature, 1)           + " C").c_str(), 8, 0xFFFFFF);
+            // k10.canvas->canvasText(("Hum: "  + String(humidity_event.relative_humidity, 1) + " %").c_str(), 7, 0xFFFFFF);
+            // k10.canvas->canvasText(("Temp: " + String(temp_event.temperature, 1)           + " C").c_str(), 8, 0xFFFFFF);
+            // k10.canvas->canvasText(("LightLux: " + String(lightIntensity)).c_str(), 6, 0xFFFFFF);
+
+            const int BAR_Y = 108;   // adjust to taste
+            drawVerticalBar(10, BAR_Y, (float)lightIntensity, 0, 400, "Lux", "",  10);
+            drawVerticalBar( 90, BAR_Y, humidity_event.relative_humidity, 0, 100, "Hum", "%", 10);
+            drawVerticalBar(170, BAR_Y, temp_event.temperature,           0,  50, "Tmp", "C", 10);
+
+            if(lightIntensity < 2) digital_write(BaclLED, LOW);  // turn off backlight if very dark
+            else digital_write(BaclLED, HIGH);  // turn on backlight otherwise
 
             char alarmHint[24];
-            snprintf(alarmHint, sizeof(alarmHint), "Alarm %02d:%02d %s",
+            snprintf(alarmHint, sizeof(alarmHint), " Alarm %02d:%02d %s",
                      aHour, aMin, aEnabled ? "[ON]" : "[OFF]");
-            k10.canvas->canvasText(alarmHint, 9, aEnabled ? 0x00FF88 : 0x888888);
+            k10.canvas->canvasText(alarmHint, 10, aEnabled ? 0x00FF88 : 0x888888);
         }
 
         // ═════════════════════════════════════════════════════════════════
@@ -342,8 +426,8 @@ void UITasks(void *pvParameters) {
         // ═════════════════════════════════════════════════════════════════
         else {
             k10.canvas->canvasText("-- ALARM --", 50, 40, 0xFFFFFF, k10.canvas->eCNAndENFont24, 11, true);
-            const uint8_t* alarmBitmap = reinterpret_cast<const uint8_t*>(epd_bitmap_alarm_logo);
-            k10.canvas->canvasDrawBitmap(65, 70, 140, 140, alarmBitmap);
+            //const uint8_t* alarmBitmap = reinterpret_cast<const uint8_t*>(epd_bitmap_alarm_logo);
+            k10.canvas->canvasDrawBitmap(45, 70, 140, 140, epd_bitmap_alarm_logo);
 
             char alarmTimeBuff[10];
             snprintf(alarmTimeBuff, sizeof(alarmTimeBuff), "%02d:%02d", aHour, aMin);
@@ -394,6 +478,8 @@ void setup() {
     asr.addASRCommand(0+1, const_cast<char*>("lights"));
     asr.addASRCommand(1+1, const_cast<char*>("fan"));
     asr.addASRCommand(2+1, const_cast<char*>("ac"));
+    asr.addASRCommand(3+1, const_cast<char*>("show alarm"));
+    asr.addASRCommand(4+1, const_cast<char*>("hide alarm"));
 
     // ── GPIO ──────────────────────────────────────────────────────────────
     pinMode(LeftTopButton,    INPUT_PULLDOWN);
@@ -404,6 +490,8 @@ void setup() {
     pinMode(TriacFan,   OUTPUT);
     digital_write(TriacLight, LOW);
     digital_write(TriacFan,   LOW);
+    //pinMode(BaclLED, OUTPUT);
+    //digital_write(BaclLED, HIGH);  // turn on backlight
 
     // ── Display ───────────────────────────────────────────────────────────
     k10.initScreen(screen_dir);
