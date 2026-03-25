@@ -1,0 +1,8 @@
+﻿nvs,data,nvs,0x9000,20K,
+factory,app,factory,0x10000,5M,
+model,data,spiffs,0x510000,4563K,
+voice_data,data,fat,0x985000,2542K,
+fr,data,undefined,0xc01000,100K,
+coredump,data,coredump,0xc1a000,1K,
+otadata,data,ota,0xc1b000,8K,
+ota_0,app,ota_0,0xc20000,2M,
