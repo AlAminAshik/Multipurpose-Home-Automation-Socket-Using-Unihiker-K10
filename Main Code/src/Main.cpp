@@ -10,7 +10,12 @@
 #define sensor_t adafruit_sensor_t
 #include <Adafruit_AHTX0.h>
 #undef sensor_t
-#include <alarmLogo.h>
+#include "RedOffSwitchIcon.h"
+#include "GreenOnSwitchIcon.h"
+#include "alarmLogo.h"
+#include "noWifiIcon.h"
+#include "wifiIcon.h"
+
 
 Adafruit_AHTX0 aht;
 WiFiManager wm;
@@ -157,6 +162,43 @@ void Configure_OTA_WIFI() {
     wm.stopConfigPortal();
 }
 
+
+// TASK: VoiceTasks  (core 1, priority 5)
+// ─────────────────────────────────────────────────────────────────────────────
+void VoiceTasks(void *pvParameters) {
+    while (true) {
+        if (asr.isWakeUp()) {
+            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            asr._wakeUp = false;
+        }
+        if (asr.isDetectCmdID(0+1)) {
+            asr._isDetectCmdID = 0;
+            toggleLight();
+        } else if (asr.isDetectCmdID(1+1)) {
+            asr._isDetectCmdID = 0;
+            toggleFan();
+        } else if (asr.isDetectCmdID(2+1)) {
+            asr._isDetectCmdID = 0;
+            toggleAC();
+        }
+        else if (asr.isDetectCmdID(3+1)) {
+            asr._isDetectCmdID = 0;
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            currentPage = PAGE_ALARM;
+            xSemaphoreGive(stateMutex);
+            backgroundNeedsRedraw = true;
+        }
+        else if (asr.isDetectCmdID(4+1)) {
+            asr._isDetectCmdID = 0;
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            currentPage = PAGE_MAIN;
+            xSemaphoreGive(stateMutex);
+            backgroundNeedsRedraw = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 // TASK: ButtonTasks  (core 0, priority 5)
 // ─────────────────────────────────────────────────────────────────────────────
 void ButtonTasks(void *pvParameters) {
@@ -268,58 +310,16 @@ void ButtonTasks(void *pvParameters) {
     }
 }
 
-// TASK: VoiceTasks  (core 1, priority 5)
-// ─────────────────────────────────────────────────────────────────────────────
-void VoiceTasks(void *pvParameters) {
+//Task: AlarmTasks  (core 0, priority 5)
+void AlarmTasks(void *pvParameters) {
+    struct tm timeinfo;          // local copy, not shared
+    bool alarmSoundActive = false; // local to this task — no race
     while (true) {
-        if (asr.isWakeUp()) {
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
-            asr._wakeUp = false;
-        }
-        if (asr.isDetectCmdID(0+1)) {
-            asr._isDetectCmdID = 0;
-            toggleLight();
-        } else if (asr.isDetectCmdID(1+1)) {
-            asr._isDetectCmdID = 0;
-            toggleFan();
-        } else if (asr.isDetectCmdID(2+1)) {
-            asr._isDetectCmdID = 0;
-            toggleAC();
-        }
-        else if (asr.isDetectCmdID(3+1)) {
-            asr._isDetectCmdID = 0;
-            xSemaphoreTake(stateMutex, portMAX_DELAY);
-            currentPage = PAGE_ALARM;
-            xSemaphoreGive(stateMutex);
-            backgroundNeedsRedraw = true;
-        }
-        else if (asr.isDetectCmdID(4+1)) {
-            asr._isDetectCmdID = 0;
-            xSemaphoreTake(stateMutex, portMAX_DELAY);
-            currentPage = PAGE_MAIN;
-            xSemaphoreGive(stateMutex);
-            backgroundNeedsRedraw = true;
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-}
-
-// TASK: UITasks  (core 0, priority 3)
-// ─────────────────────────────────────────────────────────────────────────────
-void UITasks(void *pvParameters) {
-    char timeStringBuff[20];
-    struct tm timeinfo;
-
-    while (true) {
-        // ── Snapshot appliance + page state ──────────────────────────────
-        xSemaphoreTake(stateMutex, portMAX_DELAY);
-        bool lightOn = TriacLightState;
-        bool fanOn   = TriacFanState;
-        bool acOn    = ACState;
-        Page page    = currentPage;
-        xSemaphoreGive(stateMutex);
+        // ── Get time first, outside any mutex ────────────────────────────
+        bool timeOk = (WiFi.status() == WL_CONNECTED) && getLocalTime(&timeinfo);
 
         // ── Snapshot alarm state ──────────────────────────────────────────
+        //Serial.println("AlarmTasks: Checking alarm...");
         xSemaphoreTake(AlarmMutex, portMAX_DELAY);
         int  aHour    = alarmHour;
         int  aMin     = alarmMinute;
@@ -328,8 +328,12 @@ void UITasks(void *pvParameters) {
         bool aRunning = alarmRunning;
         xSemaphoreGive(AlarmMutex);
 
-        // ── Get current time ──────────────────────────────────────────────
-        bool timeOk = (WiFi.status() == WL_CONNECTED) && getLocalTime(&timeinfo);
+        //serial print for debugging alarm logic
+        Serial.printf("Alarm check: timeOk=%d enabled=%d fired=%d running=%d "
+        "now=%02d:%02d alarm=%02d:%02d sound=%d\n",
+        timeOk, aEnabled, aFired, aRunning,
+        timeinfo.tm_hour, timeinfo.tm_min,
+        aHour, aMin, alarmSoundActive);
 
         // ── Check alarm ───────────────────────────────────────────────────
         if (aEnabled && timeOk && !aFired && !aRunning) {
@@ -361,11 +365,32 @@ void UITasks(void *pvParameters) {
                 xSemaphoreGive(AlarmMutex);
             }
         }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
+// TASK: UITasks  (core 0, priority 3)
+// ─────────────────────────────────────────────────────────────────────────────
+void UITasks(void *pvParameters) {
+    char timeStringBuff[20];
+    struct tm timeinfo;
+
+    while (true) {
+        // ── Get time outside any mutex ────────────────────────────────────
+        bool timeOk = (WiFi.status() == WL_CONNECTED) && getLocalTime(&timeinfo);
+
+        // ── Snapshot appliance + page state ──────────────────────────────
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+        bool lightOn = TriacLightState;
+        bool fanOn   = TriacFanState;
+        bool acOn    = ACState;
+        Page page    = currentPage;
+        xSemaphoreGive(stateMutex);
 
         // ── Redraw background only on page change ─────────────────────────
         if (backgroundNeedsRedraw || page != lastDrawnPage) {
             if (page == PAGE_MAIN)  k10.setScreenBackground(0x2C4C9C);
-            else                    k10.setScreenBackground(0x576490);
+            else                    k10.setScreenBackground(0x2C4C9C);  //for now I kept both as same color
             lastDrawnPage        = page;
             backgroundNeedsRedraw = false;
         }
@@ -378,10 +403,10 @@ void UITasks(void *pvParameters) {
             } else {
                 k10.canvas->canvasText("!Time!", 1, 0xFF0000);
             }
-            k10.canvas->canvasCircle(212, 15, 10, 0x00FF00, 0x00FF00, true);
+            k10.canvas->canvasDrawBitmap(190, 5, WIFIICON_WIDTH, WIFIICON_HEIGHT, WifiIcon);  //wifi is present
         } else {
-            k10.canvas->canvasCircle(212, 15, 10, 0xFF0000, 0xFF0000, true);
-            k10.canvas->canvasText("!WiFi!", 1, 0xFF0000);
+            k10.canvas->canvasDrawBitmap(190, 5, NOWIFIICON_WIDTH, NOWIFIICON_HEIGHT, NoWifiIcon); 
+            //k10.canvas->canvasText("!WiFi!", 1, 0xFF0000);
         }
         k10.canvas->canvasLine(10, 35, 230, 35, 0xFFFFFF);
 
@@ -412,13 +437,15 @@ void UITasks(void *pvParameters) {
             drawVerticalBar( 90, BAR_Y, humidity_event.relative_humidity, 0, 100, "Hum", "%", 10);
             drawVerticalBar(170, BAR_Y, temp_event.temperature,           0,  50, "Tmp", "C", 10);
 
-            if(lightIntensity < 2) digital_write(BaclLED, LOW);  // turn off backlight if very dark
-            else digital_write(BaclLED, HIGH);  // turn on backlight otherwise
+            // if(lightIntensity < 2) digital_write(BaclLED, LOW);  // turn off backlight if very dark
+            // else digital_write(BaclLED, HIGH);  // turn on backlight otherwise
 
             char alarmHint[24];
+            xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             snprintf(alarmHint, sizeof(alarmHint), " Alarm %02d:%02d %s",
-                     aHour, aMin, aEnabled ? "[ON]" : "[OFF]");
-            k10.canvas->canvasText(alarmHint, 10, aEnabled ? 0x00FF88 : 0x888888);
+                     alarmHour, alarmMinute, alarmEnabled ? "[ON]" : "[OFF]");
+            xSemaphoreGive(AlarmMutex);
+            k10.canvas->canvasText(alarmHint, 10, alarmEnabled ? 0x00FF88 : 0x888888);
         }
 
         // ═════════════════════════════════════════════════════════════════
@@ -427,14 +454,17 @@ void UITasks(void *pvParameters) {
         else {
             k10.canvas->canvasText("-- ALARM --", 50, 40, 0xFFFFFF, k10.canvas->eCNAndENFont24, 11, true);
             //const uint8_t* alarmBitmap = reinterpret_cast<const uint8_t*>(epd_bitmap_alarm_logo);
-            k10.canvas->canvasDrawBitmap(45, 70, 140, 140, epd_bitmap_alarm_logo);
+            k10.canvas->canvasDrawBitmap(65, 68, ALARMCLOCKk_WIDTH, ALARMCLOCKk_HEIGHT, alarmclockk);
 
             char alarmTimeBuff[10];
-            snprintf(alarmTimeBuff, sizeof(alarmTimeBuff), "%02d:%02d", aHour, aMin);
-            k10.canvas->canvasText(alarmTimeBuff, 88, 240, aEnabled ? 0x00FF88 : 0xFF4444,
+            xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+            snprintf(alarmTimeBuff, sizeof(alarmTimeBuff), "%02d:%02d", alarmHour, alarmMinute);
+            xSemaphoreGive(AlarmMutex);
+
+            k10.canvas->canvasText(alarmTimeBuff, 88, 240, alarmEnabled ? 0x00FF88 : 0xFF4444,
                                    k10.canvas->eCNAndENFont24, 8, true);
-            k10.canvas->canvasText(aEnabled ? "ON" : "OFF",
-                                   88, 275, aEnabled ? 0x00FF88 : 0xFF4444,
+            k10.canvas->canvasText(alarmEnabled ? "ON" : "OFF",
+                                   88, 275, alarmEnabled ? 0x00FF88 : 0xFF4444,
                                    k10.canvas->eCNAndENFont24, 8, true);
             k10.canvas->canvasLine(10, 227, 230, 227, 0x444466);
             k10.canvas->canvasText("[<] Back",   10,  295, 0xFFFFFF, k10.canvas->eCNAndENFont16, 8,  false);
@@ -442,6 +472,8 @@ void UITasks(void *pvParameters) {
             k10.canvas->canvasText("Min [^]",   185,  295, 0xFFFFFF, k10.canvas->eCNAndENFont16, 7,  false);
             k10.canvas->canvasText("[A] Toggle",  10, 235, 0xFFFFFF, k10.canvas->eCNAndENFont16, 10, false);
         }
+
+         k10.canvas->canvasDrawBitmap(127, 51, RED_OFF_SWITCH_WIDTH, RED_OFF_SWITCH_HEIGHT, Red_off_switch);
 
         k10.canvas->updateCanvas();
         vTaskDelay(pdMS_TO_TICKS(100));   // 10 fps is plenty for a status display
@@ -508,7 +540,9 @@ void setup() {
     Serial.print("Free heap before VoiceTasks:  "); Serial.println(ESP.getFreeHeap());
     xTaskCreatePinnedToCore(VoiceTasks,  "VoiceTasks",  1024*3, NULL, 5, NULL, 1);
     Serial.print("Free heap before UITasks:     "); Serial.println(ESP.getFreeHeap());
-    xTaskCreatePinnedToCore(UITasks,     "UITasks",     1024*8, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(UITasks,     "UITasks",     1024*8, NULL, 5, NULL, 0);
+    Serial.print("Free heap before alarm tasks: "); Serial.println(ESP.getFreeHeap());
+    xTaskCreatePinnedToCore(AlarmTasks, "AlarmTasks", 1024*5, NULL, 5, NULL, 0);
 }
 
 // LOOP
