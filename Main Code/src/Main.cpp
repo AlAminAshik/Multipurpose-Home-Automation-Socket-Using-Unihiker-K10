@@ -16,7 +16,6 @@
 #include "noWifiIcon.h"
 #include "wifiIcon.h"
 
-
 Adafruit_AHTX0 aht;
 WiFiManager wm;
 
@@ -28,6 +27,7 @@ WiFiManager wm;
 UNIHIKER_K10 k10;
 uint8_t screen_dir = 2;
 uint16_t lightIntensity;
+#define BackLED P1  //this pin was soldered with the backled transistor of the display since eLCD_BLK pin interferes with the voice
 
 ASR   asr;
 Music music;
@@ -48,7 +48,7 @@ uint16_t AC_OFFrawData[197] = {6076,7334,614,1654,614,1656,614,1654,616,1652,612
 //#define BaclLED           eLCD_BLK
 
 // ── Page enum ─────────────────────────────────────────────────────────────────
-enum Page { PAGE_MAIN, PAGE_ALARM };
+enum Page { PAGE_MAIN, PAGE_ALARM};
 static volatile Page currentPage = PAGE_MAIN;
 
 // ── Alarm state ───────────────────────────────────────────────────────────────
@@ -73,7 +73,7 @@ static SemaphoreHandle_t AlarmMutex = NULL;  // protects alarm state
 
 // ── Page-change tracking (UI task only, no mutex needed) ─────────────────────
 static Page lastDrawnPage = PAGE_MAIN;
-static bool backgroundNeedsRedraw = true;   // force draw on first frame
+static volatile bool backgroundNeedsRedraw = true;   // force draw on first frame
 
 // ─────────────────────────────────────────────────────────────────────────────
 void toggleLight() {
@@ -110,19 +110,20 @@ void toggleAC() {
     xSemaphoreGive(stateMutex);
 }
 
-
-// Helper – draws one appliance block
-// x, y = top-left corner, w/h = size, state = on/off, label = text
-void drawApplianceBlock(int x, int y, int w, int h, bool state, const char* label) {
-    uint16_t bgColor   = state ? 0x00CC44 : 0x555555;  // green / grey
-    uint16_t textColor = 0xFFFFFF;
-    k10.canvas->canvasRectangle(x, y, w, h, bgColor, bgColor, true);   // filled rect
-    // Centre the label inside the block
-    int textX = x + w / 2;
-    int textY = y + h / 2 - 8;   // nudge up slightly for visual centre
-    k10.canvas->canvasText(label, textX, textY, textColor,
-                           k10.canvas->eCNAndENFont16, strlen(label), true);
+void setBacklight(uint16_t lux) {
+    uint8_t duty;
+    if (lux < 2) {
+        duty = 0;           // display off
+    } else if (lux >= 15) {
+        duty = 255;         // full brightness
+    } else {
+        // linear ramp
+        // minimum 50 (not 0) so the screen is always barely visible at lux=2
+        duty = (uint8_t)(50 + ((lux - 2) * (255 - 50)) / (15 - 2));
+    }
+    ledcWrite(BackLED, duty);
 }
+
 
 // Helper – draws a vertical bar gauge using pipe characters
 // x, y     = top-left of the bar area
@@ -131,8 +132,7 @@ void drawApplianceBlock(int x, int y, int w, int h, bool state, const char* labe
 // label    = e.g. "Lux", "Hum", "Tmp"
 // unit     = e.g. "%", "C", ""
 // barHeight = total number of '|' characters at full scale
-void drawVerticalBar(int x, int y, float value, float minVal, float maxVal,
-                     const char* label, const char* unit, int barHeight = 10) {
+void drawVerticalBar(int x, int y, float value, float minVal, float maxVal, const char* label, const char* unit, int barHeight = 10) {
     // Clamp & compute how many filled bars
     float clamped = constrain(value, minVal, maxVal);
     int filled    = (int)roundf((clamped - minVal) / (maxVal - minVal) * barHeight);
@@ -251,7 +251,7 @@ void ButtonTasks(void *pvParameters) {
             if (!lbLongFired && (millis() - lbPressTime >= 5000)) {
                 lbLongFired = true;
                 Serial.println("Entering OTA Mode");
-                // Configure_OTA_WIFI();
+                Configure_OTA_WIFI();       //enable WiFi and block here until new credentials are entered
             }
         }
         if (releasedLeftBottom) {
@@ -315,8 +315,10 @@ void AlarmTasks(void *pvParameters) {
     struct tm timeinfo;          // local copy, not shared
     bool alarmSoundActive = false; // local to this task — no race
     while (true) {
-        // ── Get time first, outside any mutex ────────────────────────────
-        bool timeOk = (WiFi.status() == WL_CONNECTED) && getLocalTime(&timeinfo);
+        bool timeOkk = false;
+        if(WiFi.status() == WL_CONNECTED) {
+            timeOkk = getLocalTime(&timeinfo, 0);  // ← 0ms timeout, never blocks
+        }
 
         // ── Snapshot alarm state ──────────────────────────────────────────
         //Serial.println("AlarmTasks: Checking alarm...");
@@ -331,12 +333,12 @@ void AlarmTasks(void *pvParameters) {
         //serial print for debugging alarm logic
         Serial.printf("Alarm check: timeOk=%d enabled=%d fired=%d running=%d "
         "now=%02d:%02d alarm=%02d:%02d sound=%d\n",
-        timeOk, aEnabled, aFired, aRunning,
+        timeOkk, aEnabled, aFired, aRunning,
         timeinfo.tm_hour, timeinfo.tm_min,
         aHour, aMin, alarmSoundActive);
 
         // ── Check alarm ───────────────────────────────────────────────────
-        if (aEnabled && timeOk && !aFired && !aRunning) {
+        if (aEnabled && timeOkk && !aFired && !aRunning) {
             if (timeinfo.tm_hour == aHour && timeinfo.tm_min == aMin) {
                 xSemaphoreTake(AlarmMutex, portMAX_DELAY);
                 alarmRunning = true;
@@ -358,7 +360,7 @@ void AlarmTasks(void *pvParameters) {
         }
 
         // Reset alarmFired when minute advances past the alarm minute
-        if (aFired && timeOk) {
+        if (aFired && timeOkk) {
             if (timeinfo.tm_hour != aHour || timeinfo.tm_min != aMin) {
                 xSemaphoreTake(AlarmMutex, portMAX_DELAY);
                 alarmFired = false;
@@ -369,16 +371,15 @@ void AlarmTasks(void *pvParameters) {
     }
 }
 
-// TASK: UITasks  (core 0, priority 3)
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------
+//UI TASKS (core 1, priority 5)
+
 void UITasks(void *pvParameters) {
     char timeStringBuff[20];
     struct tm timeinfo;
+    Page lastPage = PAGE_MAIN;
 
     while (true) {
-        // ── Get time outside any mutex ────────────────────────────────────
-        bool timeOk = (WiFi.status() == WL_CONNECTED) && getLocalTime(&timeinfo);
-
         // ── Snapshot appliance + page state ──────────────────────────────
         xSemaphoreTake(stateMutex, portMAX_DELAY);
         bool lightOn = TriacLightState;
@@ -387,99 +388,118 @@ void UITasks(void *pvParameters) {
         Page page    = currentPage;
         xSemaphoreGive(stateMutex);
 
+        //always clear the canvas first
+        //k10.canvas->canvasClear(13); doesnt work
+        k10.canvas->clearLocalCanvas(0, 0, 240, 320);   // full clear before redraw
+        
         // ── Redraw background only on page change ─────────────────────────
         if (backgroundNeedsRedraw || page != lastDrawnPage) {
-            if (page == PAGE_MAIN)  k10.setScreenBackground(0x2C4C9C);
-            else                    k10.setScreenBackground(0x2C4C9C);  //for now I kept both as same color
-            lastDrawnPage        = page;
+            k10.setScreenBackground(0x2C4C9C);
+            lastDrawnPage         = page;
             backgroundNeedsRedraw = false;
         }
+
+        // ── Get time ONCE, outside WiFi check, with a hard timeout ────────
+        // getLocalTime()'s second argument is the timeout in ms.
+        // Default is 5000ms — set it to 0 to return immediately from cache.
+        // This prevents blocking UITasks when WiFi is down.
+        bool timeOk = getLocalTime(&timeinfo, 0);  // ← 0ms timeout, never blocks
 
         // ── Top bar ───────────────────────────────────────────────────────
         if (WiFi.status() == WL_CONNECTED) {
             if (timeOk) {
                 strftime(timeStringBuff, sizeof(timeStringBuff), "%I:%M %p", &timeinfo);
-                k10.canvas->canvasText(timeStringBuff, 10, 5, 0xFFFFFF, k10.canvas->eCNAndENFont24, 8, true);
+                k10.canvas->canvasText(timeStringBuff, 10, 5, 0xFFFFFF,
+                                       k10.canvas->eCNAndENFont24, 8, true);
             } else {
-                k10.canvas->canvasText("!Time!", 1, 0xFF0000);
+                k10.canvas->canvasText("!Time!", 10, 5, 0xFF0000,
+                                       k10.canvas->eCNAndENFont24, 6, true);
             }
-            k10.canvas->canvasDrawBitmap(190, 5, WIFIICON_WIDTH, WIFIICON_HEIGHT, WifiIcon);  //wifi is present
+            k10.canvas->canvasDrawBitmap(190, 7, WIFIICON_WIDTH, WIFIICON_HEIGHT, WifiIcon);
         } else {
-            k10.canvas->canvasDrawBitmap(190, 5, NOWIFIICON_WIDTH, NOWIFIICON_HEIGHT, NoWifiIcon); 
-            //k10.canvas->canvasText("!WiFi!", 1, 0xFF0000);
+            // Still show cached time if available even without WiFi
+            if (timeOk) {
+                strftime(timeStringBuff, sizeof(timeStringBuff), "%I:%M %p", &timeinfo);
+                k10.canvas->canvasText(timeStringBuff, 10, 5, 0xAAAAAA,  // greyed out = stale
+                                       k10.canvas->eCNAndENFont24, 8, true);
+            }
+            k10.canvas->canvasDrawBitmap(190, 7, NOWIFIICON_WIDTH, NOWIFIICON_HEIGHT, NoWifiIcon);
         }
         k10.canvas->canvasLine(10, 35, 230, 35, 0xFFFFFF);
 
         // ═════════════════════════════════════════════════════════════════
-        // DRAW: MAIN PAGE
+        // DRAW: MAIN PAGE  — runs regardless of WiFi status
         // ═════════════════════════════════════════════════════════════════
         if (page == PAGE_MAIN) {
-            // k10.canvas->canvasText(lightOn ? "Light (ON)"  : "Light (OFF)", 3, 0xFFFFFF);
-            // k10.canvas->canvasText(fanOn   ? "Fan   (ON)"  : "Fan   (OFF)", 4, 0xFFFFFF);
-            // k10.canvas->canvasText(acOn    ? "AC    (ON)"  : "AC    (OFF)", 5, 0xFFFFFF);
-            
-            // Three blocks side-by-side, 10 px gap, starting at y=45 (below the divider)
-            const int BX = 10, BY = 45, BW = 68, BH = 50, GAP = 6; // dimensions and gap for appliance blocks
-            drawApplianceBlock(BX + 0*(BW+GAP), BY, BW, BH, lightOn, "LIGHT");
-            drawApplianceBlock(BX + 1*(BW+GAP), BY, BW, BH, fanOn,   "FAN");
-            drawApplianceBlock(BX + 2*(BW+GAP), BY, BW, BH, acOn,    "AC");
+            k10.canvas->canvasText(" [LIGHT]",   3, 0xFFFFFF);
+            k10.canvas->canvasText("    [FAN]",  5, 0xFFFFFF);
+            k10.canvas->canvasText("      [AC]", 7, 0xFFFFFF);
+
+            k10.canvas->canvasDrawBitmap(127,  53, RED_OFF_SWITCH_WIDTH, RED_OFF_SWITCH_HEIGHT,
+                lightOn ? greenbutton : Red_off_switch);
+            k10.canvas->canvasDrawBitmap(127, 102, RED_OFF_SWITCH_WIDTH, RED_OFF_SWITCH_HEIGHT,
+                fanOn   ? greenbutton : Red_off_switch);
+            k10.canvas->canvasDrawBitmap(127, 147, RED_OFF_SWITCH_WIDTH, RED_OFF_SWITCH_HEIGHT,
+                acOn    ? greenbutton : Red_off_switch);
+
+            k10.canvas->canvasLine(10, 191, 230, 191, 0xFFFFFF);
 
             lightIntensity = k10.readALS();
-            
+            setBacklight(lightIntensity);
+
             sensors_event_t humidity_event, temp_event;
             aht.getEvent(&humidity_event, &temp_event);
-            // k10.canvas->canvasText(("Hum: "  + String(humidity_event.relative_humidity, 1) + " %").c_str(), 7, 0xFFFFFF);
-            // k10.canvas->canvasText(("Temp: " + String(temp_event.temperature, 1)           + " C").c_str(), 8, 0xFFFFFF);
-            // k10.canvas->canvasText(("LightLux: " + String(lightIntensity)).c_str(), 6, 0xFFFFFF);
 
-            const int BAR_Y = 108;   // adjust to taste
-            drawVerticalBar(10, BAR_Y, (float)lightIntensity, 0, 400, "Lux", "",  10);
-            drawVerticalBar( 90, BAR_Y, humidity_event.relative_humidity, 0, 100, "Hum", "%", 10);
-            drawVerticalBar(170, BAR_Y, temp_event.temperature,           0,  50, "Tmp", "C", 10);
+            const int BAR_Y = 200;
+            drawVerticalBar( 10, BAR_Y, (float)lightIntensity,              0, 400, "Lux", "",  10);
+            drawVerticalBar( 90, BAR_Y, humidity_event.relative_humidity,   0, 100, "Hum", "%", 10);
+            drawVerticalBar(170, BAR_Y, temp_event.temperature,             0,  50, "Tmp", "C", 10);
 
-            // if(lightIntensity < 2) digital_write(BaclLED, LOW);  // turn off backlight if very dark
-            // else digital_write(BaclLED, HIGH);  // turn on backlight otherwise
+            k10.canvas->canvasLine(10, 257, 230, 257, 0xFFFFFF);
 
             char alarmHint[24];
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             snprintf(alarmHint, sizeof(alarmHint), " Alarm %02d:%02d %s",
                      alarmHour, alarmMinute, alarmEnabled ? "[ON]" : "[OFF]");
             xSemaphoreGive(AlarmMutex);
-            k10.canvas->canvasText(alarmHint, 10, alarmEnabled ? 0x00FF88 : 0x888888);
+            k10.canvas->canvasText(alarmHint, 12, alarmEnabled ? 0x00FF88 : 0x888888);
+            k10.canvas->canvasText("alaminn.com", 10, 305, 0xFFFFFF,
+                                   k10.canvas->eCNAndENFont16, 11, true);
         }
 
         // ═════════════════════════════════════════════════════════════════
-        // DRAW: ALARM PAGE
+        // DRAW: ALARM PAGE  — runs regardless of WiFi status
         // ═════════════════════════════════════════════════════════════════
         else {
-            k10.canvas->canvasText("-- ALARM --", 50, 40, 0xFFFFFF, k10.canvas->eCNAndENFont24, 11, true);
-            //const uint8_t* alarmBitmap = reinterpret_cast<const uint8_t*>(epd_bitmap_alarm_logo);
+            k10.canvas->canvasText("-- ALARM --", 50, 40, 0xFFFFFF,
+                                   k10.canvas->eCNAndENFont24, 11, true);
             k10.canvas->canvasDrawBitmap(65, 68, ALARMCLOCKk_WIDTH, ALARMCLOCKk_HEIGHT, alarmclockk);
 
             char alarmTimeBuff[10];
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             snprintf(alarmTimeBuff, sizeof(alarmTimeBuff), "%02d:%02d", alarmHour, alarmMinute);
+            bool aEnabled = alarmEnabled;
             xSemaphoreGive(AlarmMutex);
 
-            k10.canvas->canvasText(alarmTimeBuff, 88, 240, alarmEnabled ? 0x00FF88 : 0xFF4444,
+            k10.canvas->canvasText(alarmTimeBuff, 88, 240, aEnabled ? 0x00FF88 : 0xFF4444,
                                    k10.canvas->eCNAndENFont24, 8, true);
-            k10.canvas->canvasText(alarmEnabled ? "ON" : "OFF",
-                                   88, 275, alarmEnabled ? 0x00FF88 : 0xFF4444,
+            k10.canvas->canvasText(aEnabled ? "ON" : "OFF", 88, 275,
+                                   aEnabled ? 0x00FF88 : 0xFF4444,
                                    k10.canvas->eCNAndENFont24, 8, true);
-            k10.canvas->canvasLine(10, 227, 230, 227, 0x444466);
-            k10.canvas->canvasText("[<] Back",   10,  295, 0xFFFFFF, k10.canvas->eCNAndENFont16, 8,  false);
-            k10.canvas->canvasText("Hr [^]",    185,  235, 0xFFFFFF, k10.canvas->eCNAndENFont16, 6,  false);
-            k10.canvas->canvasText("Min [^]",   185,  295, 0xFFFFFF, k10.canvas->eCNAndENFont16, 7,  false);
+            k10.canvas->canvasLine(10, 227, 230, 227, 0xFFFFFF);
+            k10.canvas->canvasText("[<] Back",    10, 295, 0xFFFFFF, k10.canvas->eCNAndENFont16,  8, false);
+            k10.canvas->canvasText("Hr [^]",     185, 235, 0xFFFFFF, k10.canvas->eCNAndENFont16,  6, false);
+            k10.canvas->canvasText("Min [^]",    185, 295, 0xFFFFFF, k10.canvas->eCNAndENFont16,  7, false);
             k10.canvas->canvasText("[A] Toggle",  10, 235, 0xFFFFFF, k10.canvas->eCNAndENFont16, 10, false);
         }
 
-         k10.canvas->canvasDrawBitmap(127, 51, RED_OFF_SWITCH_WIDTH, RED_OFF_SWITCH_HEIGHT, Red_off_switch);
-
         k10.canvas->updateCanvas();
-        vTaskDelay(pdMS_TO_TICKS(100));   // 10 fps is plenty for a status display
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
+
+// ═════════════════════════════════════════════════════════════════════════════
 // SETUP
 // ═════════════════════════════════════════════════════════════════════════════
 void setup() {
@@ -490,7 +510,7 @@ void setup() {
     // ── Create ALL mutexes before any task is spawned ─────────────────────
     stateMutex = xSemaphoreCreateMutex();
     irMutex    = xSemaphoreCreateMutex();
-    AlarmMutex = xSemaphoreCreateMutex();   // ← was missing, caused the crash
+    AlarmMutex = xSemaphoreCreateMutex();
 
     // ── WiFi ──────────────────────────────────────────────────────────────
     WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -530,19 +550,23 @@ void setup() {
     k10.creatCanvas();
     k10.canvas->canvasSetLineWidth(1);
     k10.setScreenBackground(0x2C4C9C);   // draw background once at startup
+    
+    //setup backlight PWM (display backlight is wired to P1 via a transistor, so we can use PWM to control brightness if desired. For now we just turn it fully on)
+    ledcSetup(2, 5000, 8);  // channel 0, 5 KHz, 8-bit resolution
+    ledcAttachPin(BackLED, 2);  // attach pin to channel 0
 
     // ── AHT sensor ───────────────────────────────────────────────────────
     if (!aht.begin()) Serial.println("AHT10/AHT20 not found");
 
     // ── Tasks ─────────────────────────────────────────────────────────────
     Serial.print("Free heap before ButtonTasks: "); Serial.println(ESP.getFreeHeap());
-    xTaskCreatePinnedToCore(ButtonTasks, "ButtonTasks", 1024*6, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(ButtonTasks, "ButtonTasks", 1024*8, NULL, 5, NULL, 0);
     Serial.print("Free heap before VoiceTasks:  "); Serial.println(ESP.getFreeHeap());
     xTaskCreatePinnedToCore(VoiceTasks,  "VoiceTasks",  1024*3, NULL, 5, NULL, 1);
     Serial.print("Free heap before UITasks:     "); Serial.println(ESP.getFreeHeap());
-    xTaskCreatePinnedToCore(UITasks,     "UITasks",     1024*8, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(UITasks,     "UITasks",     1024*8, NULL, 5, NULL, 1);
     Serial.print("Free heap before alarm tasks: "); Serial.println(ESP.getFreeHeap());
-    xTaskCreatePinnedToCore(AlarmTasks, "AlarmTasks", 1024*5, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(AlarmTasks, "AlarmTasks", 1024*5, NULL, 5, NULL, 1);
 }
 
 // LOOP
