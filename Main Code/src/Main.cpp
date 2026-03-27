@@ -32,11 +32,11 @@ uint16_t lightIntensity;
 ASR   asr;
 Music music;
 
-const uint16_t kIrLed = 1;
+const uint16_t kIrLed = P0; // this pin was soldered with the IR LED on the back of the board
 IRsend irsend(kIrLed);
 
-uint16_t AC_ONrawData[197]  = {6084,7334,614,1652,618,1648,620,1648,622,1650,616,1650,620,1650,620,1648,620,1648,618,534,618,528,620,530,622,528,620,530,624,526,620,528,622,528,620,1648,622,1648,622,1648,620,1650,618,1648,620,1652,616,1652,618,1650,618,530,622,530,620,530,616,532,620,530,620,530,618,532,618,528,620,1652,616,1648,620,1650,620,1652,614,1650,620,1650,618,1650,616,1648,620,532,616,530,620,534,618,528,620,530,616,534,618,530,618,530,618,1650,618,530,620,532,618,1650,620,528,620,534,618,530,618,1648,620,530,622,1646,620,1650,616,534,618,1646,620,1648,618,1652,618,534,614,530,620,1648,620,1648,620,530,620,1652,616,532,616,1652,616,1652,590,1680,616,530,618,530,618,1648,594,558,592,1678,614,532,618,534,618,532,616,1654,614,534,616,1654,614,534,618,1652,616,532,616,1654,616,1648,620,530,622,1646,618,536,618,1648,618,530,622,1652,614,530,622,7348,622};
-uint16_t AC_OFFrawData[197] = {6076,7334,614,1654,614,1656,614,1654,616,1652,612,1656,614,1658,610,1656,612,1656,612,538,614,536,612,538,614,534,614,536,614,538,614,536,614,536,614,1654,614,1654,612,1654,612,1656,616,1652,614,1654,614,1656,614,1652,612,538,612,538,614,534,612,536,614,536,614,538,614,536,614,536,614,1656,612,1656,614,1654,614,1654,612,1656,612,1656,614,1654,612,1656,610,538,614,536,614,536,612,536,612,538,616,534,610,542,610,538,612,1656,612,1656,614,536,614,1654,614,536,614,536,612,538,612,1654,614,534,614,536,616,1652,614,536,614,1652,614,1654,612,1658,612,536,614,536,614,1652,612,1654,614,540,612,1652,614,542,584,1682,614,1654,612,1652,616,538,610,538,612,1656,612,538,588,1678,612,540,610,540,586,564,584,1682,612,540,610,1656,610,542,592,1674,588,564,584,1682,584,1686,586,564,584,1684,584,568,584,1684,584,568,582,1686,582,566,582,7384,584};
+uint16_t AC_ONrawData[197]  = {6058, 7340,  608, 1684,  586, 1684,  584, 1682,  586, 1682,  586, 1682,  584, 1684,  586, 1684,  586, 1682,  586, 564,  586, 566,  582, 568,  584, 566,  584, 566,  584, 566,  584, 564,  586, 566,  582, 1684,  584, 1686,  582, 1684,  584, 1684,  582, 1688,  582, 1684,  584, 1686,  582, 1684,  584, 566,  586, 564,  582, 566,  584, 574,  576, 566,  584, 574,  576, 566,  584, 566,  586, 1684,  582, 1692,  578, 1682,  586, 1682,  584, 1684,  584, 1682,  584, 1684,  584, 1684,  586, 564,  584, 566,  586, 564,  586, 566,  584, 568,  584, 564,  584, 566,  586, 564,  582, 1688,  584, 564,  586, 564,  586, 1684,  584, 564,  586, 564,  586, 562,  586, 1682,  586, 564,  586, 1684,  584, 1684,  582, 566,  582, 1686,  588, 1680,  558, 1710,  586, 564,  584, 1686,  582, 1684,  584, 576,  576, 568,  580, 1686,  586, 564,  584, 1684,  582, 1684,  584, 568,  586, 564,  584, 1684,  584, 1684,  586, 562,  586, 1684,  582, 566,  586, 564,  586, 564,  586, 1684,  584, 564,  584, 1692,  574, 568,  586, 1682,  584, 568,  584, 1682,  586, 1684,  584, 566,  586, 1684,  584, 566,  582, 1686,  582, 566,  584, 1684,  584, 564,  586, 7386,  586};
+uint16_t AC_OFFrawData[197] = {6094, 7330,  618, 1654,  620, 1650,  614, 1650,  620, 1654,  616, 1652,  616, 1650,  618, 1650,  618, 1650,  616, 536,  614, 536,  616, 536,  614, 538,  612, 536,  614, 534,  616, 536,  614, 536,  616, 1654,  614, 1650,  616, 1654,  616, 1654,  614, 1652,  616, 1654,  616, 1652,  612, 1658,  612, 534,  616, 534,  616, 538,  586, 562,  612, 538,  612, 536,  612, 540,  610, 536,  614, 1652,  616, 1652,  614, 1656,  612, 1654,  614, 1654,  616, 1652,  616, 1654,  614, 1650,  616, 536,  614, 536,  616, 534,  616, 534,  614, 534,  616, 536,  614, 534,  616, 536,  614, 1656,  614, 1654,  612, 536,  616, 1654,  612, 538,  614, 534,  616, 536,  614, 1654,  616, 536,  612, 536,  616, 1652,  612, 536,  588, 1682,  612, 1656,  612, 1654,  588, 566,  610, 1654,  612, 1658,  612, 540,  612, 538,  612, 1656,  612, 536,  586, 1684,  612, 1652,  612, 538,  616, 538,  610, 1654,  614, 1656,  612, 538,  614, 1654,  614, 536,  614, 536,  612, 536,  614, 1656,  612, 538,  612, 1654,  616, 536,  610, 1660,  612, 538,  612, 1652,  618, 1652,  614, 538,  612, 1656,  612, 536,  616, 1652,  614, 536,  614, 1652,  616, 536,  614, 7354,  618};
 
 // ── Button & output pins ──────────────────────────────────────────────────────
 #define LeftTopButton     eP5_KeyA
@@ -45,13 +45,13 @@ uint16_t AC_OFFrawData[197] = {6076,7334,614,1654,614,1656,614,1654,616,1652,612
 #define RightBottomButton eP8
 #define TriacLight        eP9
 #define TriacFan          eP10
-//#define BaclLED           eLCD_BLK
+//#define BaclLED           eLCD_BLK    //using this pin blocks voice, idk why
 
 // ── Page enum ─────────────────────────────────────────────────────────────────
 enum Page { PAGE_MAIN, PAGE_ALARM};
 static volatile Page currentPage = PAGE_MAIN;
 
-// ── Alarm state ───────────────────────────────────────────────────────────────
+// Alarm state ───────────────────────────────────────────────────────────────
 static volatile int  alarmHour    = 6;
 static volatile int  alarmMinute  = 0;
 static volatile bool alarmEnabled = false;
@@ -60,18 +60,18 @@ static volatile bool alarmRunning = false;
 // Local variable to track whether we already started the alarm sound
 static bool alarmSoundActive = false;
 
-// ── Shared appliance state ────────────────────────────────────────────────────
+// Shared appliance state ────────────────────────────────────────────────────
 static volatile bool TriacLightState = false;
 static volatile bool TriacFanState   = false;
 static volatile bool ACState         = false;
 static volatile bool backLightState  = false;
 
-// ── Semaphores / mutexes ──────────────────────────────────────────────────────
+// Semaphores / mutexes ──────────────────────────────────────────────────────
 static SemaphoreHandle_t stateMutex = NULL;  // protects appliance states + page
 static SemaphoreHandle_t irMutex    = NULL;  // protects irsend
 static SemaphoreHandle_t AlarmMutex = NULL;  // protects alarm state
 
-// ── Page-change tracking (UI task only, no mutex needed) ─────────────────────
+//Page-change tracking (UI task only, no mutex needed) ─────────────────────
 static Page lastDrawnPage = PAGE_MAIN;
 static volatile bool backgroundNeedsRedraw = true;   // force draw on first frame
 
@@ -83,6 +83,7 @@ void toggleLight() {
     xSemaphoreGive(stateMutex);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 void toggleFan() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     TriacFanState = !TriacFanState;
@@ -90,12 +91,16 @@ void toggleFan() {
     xSemaphoreGive(stateMutex);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 void toggleAC() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     bool newState = !ACState;
     xSemaphoreGive(stateMutex);
 
     xSemaphoreTake(irMutex, portMAX_DELAY);
+
+    //suspend all other tasks on this code during transmission (very important)
+    vTaskSuspendAll();
     if (newState) {
         irsend.sendRaw(AC_ONrawData,  197, 38);
         Serial.println("IR → AC ON");
@@ -103,6 +108,7 @@ void toggleAC() {
         irsend.sendRaw(AC_OFFrawData, 197, 38);
         Serial.println("IR → AC OFF");
     }
+    xTaskResumeAll();
     xSemaphoreGive(irMutex);
 
     xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -110,6 +116,7 @@ void toggleAC() {
     xSemaphoreGive(stateMutex);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 void setBacklight(uint16_t lux) {
     uint8_t duty;
     if (lux < 2) {
@@ -124,7 +131,7 @@ void setBacklight(uint16_t lux) {
     ledcWrite(BackLED, duty);
 }
 
-
+// ─────────────────────────────────────────────────────────────────────────────
 // Helper – draws a vertical bar gauge using pipe characters
 // x, y     = top-left of the bar area
 // value    = current reading
@@ -161,9 +168,10 @@ void Configure_OTA_WIFI() {
     else      Serial.println("New WiFi saved successfully");
     wm.stopConfigPortal();
 }
+// ─────────────────────────────────────────────────────────────────────────────
 
-
-// TASK: VoiceTasks  (core 1, priority 5)
+// TASKS ─────────────────────────────────────────────────────────────────────────────
+// TASK: VoiceTasks
 // ─────────────────────────────────────────────────────────────────────────────
 void VoiceTasks(void *pvParameters) {
     while (true) {
@@ -199,7 +207,7 @@ void VoiceTasks(void *pvParameters) {
     }
 }
 
-// TASK: ButtonTasks  (core 0, priority 5)
+// TASK: ButtonTasks
 // ─────────────────────────────────────────────────────────────────────────────
 void ButtonTasks(void *pvParameters) {
     bool prevLeftTop     = false;
@@ -310,7 +318,8 @@ void ButtonTasks(void *pvParameters) {
     }
 }
 
-//Task: AlarmTasks  (core 0, priority 5)
+//Task: AlarmTasks
+// ─────────────────────────────────────────────────────────────────────────────
 void AlarmTasks(void *pvParameters) {
     struct tm timeinfo;          // local copy, not shared
     bool alarmSoundActive = false; // local to this task — no race
@@ -371,9 +380,8 @@ void AlarmTasks(void *pvParameters) {
     }
 }
 
-// ------------------
-//UI TASKS (core 1, priority 5)
-
+//UI TASKS
+// ─────────────────────────────────────────────────────────────────────────────
 void UITasks(void *pvParameters) {
     char timeStringBuff[20];
     struct tm timeinfo;
@@ -403,7 +411,7 @@ void UITasks(void *pvParameters) {
         // getLocalTime()'s second argument is the timeout in ms.
         // Default is 5000ms — set it to 0 to return immediately from cache.
         // This prevents blocking UITasks when WiFi is down.
-        bool timeOk = getLocalTime(&timeinfo, 0);  // ← 0ms timeout, never blocks
+        bool timeOk = getLocalTime(&timeinfo, 0);  // 0ms timeout, never blocks
 
         // ── Top bar ───────────────────────────────────────────────────────
         if (WiFi.status() == WL_CONNECTED) {
@@ -427,9 +435,8 @@ void UITasks(void *pvParameters) {
         }
         k10.canvas->canvasLine(10, 35, 230, 35, 0xFFFFFF);
 
-        // ═════════════════════════════════════════════════════════════════
         // DRAW: MAIN PAGE  — runs regardless of WiFi status
-        // ═════════════════════════════════════════════════════════════════
+        // ─────────────────────────────────────────────────────────────────────────────
         if (page == PAGE_MAIN) {
             k10.canvas->canvasText(" [LIGHT]",   3, 0xFFFFFF);
             k10.canvas->canvasText("    [FAN]",  5, 0xFFFFFF);
@@ -467,9 +474,8 @@ void UITasks(void *pvParameters) {
                                    k10.canvas->eCNAndENFont16, 11, true);
         }
 
-        // ═════════════════════════════════════════════════════════════════
         // DRAW: ALARM PAGE  — runs regardless of WiFi status
-        // ═════════════════════════════════════════════════════════════════
+        // ─────────────────────────────────────────────────────────────────────────────
         else {
             k10.canvas->canvasText("-- ALARM --", 50, 40, 0xFFFFFF,
                                    k10.canvas->eCNAndENFont24, 11, true);
@@ -499,9 +505,9 @@ void UITasks(void *pvParameters) {
 }
 
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 // SETUP
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
 void setup() {
     k10.begin();
     Serial.begin(115200);
@@ -569,8 +575,8 @@ void setup() {
     xTaskCreatePinnedToCore(AlarmTasks, "AlarmTasks", 1024*5, NULL, 5, NULL, 1);
 }
 
-// LOOP
-// ═════════════════════════════════════════════════════════════════════════════
+// LOOP ( 8kb in size)
+// ─────────────────────────────────────────────────────────────────────────────
 void loop() {
     vTaskDelay(pdMS_TO_TICKS(200));
 }
