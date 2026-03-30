@@ -1,30 +1,6 @@
-// /*
-//  * IRremoteESP8266: IRrecvDumpV2 - dump details of IR codes with IRrecv
-//  * An IR detector/demodulator must be connected to the input kRecvPin.
-//  *
-//  * Copyright 2009 Ken Shirriff, http://arcfn.com
-//  * Copyright 2017-2019 David Conran
-//  *
-//  * Example circuit diagram:
-//  *  https://github.com/crankyoldgit/IRremoteESP8266/wiki#ir-receiving
-//  *
-//  * Changes:
-//  *   Version 1.2 October, 2020
-//  *     - Enable easy setting of the decoding tolerance value.
-//  *   Version 1.0 October, 2019
-//  *     - Internationalisation (i18n) support.
-//  *     - Stop displaying the legacy raw timing info.
-//  *   Version 0.5 June, 2019
-//  *     - Move A/C description to IRac.cpp.
-//  *   Version 0.4 July, 2018
-//  *     - Minor improvements and more A/C unit support.
-//  *   Version 0.3 November, 2017
-//  *     - Support for A/C decoding for some protocols.
-//  *   Version 0.2 April, 2017
-//  *     - Decode from a copy of the data so we can start capturing faster thus
-//  *       reduce the likelihood of miscaptures.
-//  * Based on Ken Shirriff's IrsendDemo Version 0.1 July, 2009,
-//  */
+//this code is use to dump the raw data of the IR signal received by the IR receiver, and then we can use this data to decode the signal and find out which button is pressed on the remote control. This code is based on the IRrecvDump example provided by the IRremoteESP8266 library, but it has been modified to work with the ESP32-C3 and to use a larger capture buffer size and a longer timeout value to capture more complex messages. The code also includes some tunable parameters that can be adjusted to improve the accuracy of the decoding process.
+//this is not the part pf the main code.
+//ignore this code
 
 // #include <Arduino.h>
 // #include <assert.h>

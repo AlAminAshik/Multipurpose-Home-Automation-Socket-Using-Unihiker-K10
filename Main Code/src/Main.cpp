@@ -52,7 +52,7 @@ enum Page { PAGE_MAIN, PAGE_ALARM};
 static volatile Page currentPage = PAGE_MAIN;
 
 // Alarm state ───────────────────────────────────────────────────────────────
-static volatile int  alarmHour    = 6;
+static volatile int  alarmHour    = 0;
 static volatile int  alarmMinute  = 0;
 static volatile bool alarmEnabled = false;
 static volatile bool alarmFired   = false;
@@ -72,7 +72,6 @@ static SemaphoreHandle_t irMutex    = NULL;  // protects irsend
 static SemaphoreHandle_t AlarmMutex = NULL;  // protects alarm state
 
 //Page-change tracking (UI task only, no mutex needed) ─────────────────────
-static Page lastDrawnPage = PAGE_MAIN;
 static volatile bool backgroundNeedsRedraw = true;   // force draw on first frame
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,9 +157,9 @@ void drawVerticalBar(int x, int y, float value, float minVal, float maxVal, cons
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-void Configure_OTA_WIFI() {
+void Configure_WIFI() {
     wm.resetSettings();
-    wm.setConfigPortalTimeout(300);
+    wm.setConfigPortalTimeout(100);
     wm.setShowInfoErase(false);
     wm.setClass("invert");
     bool res = wm.autoConnect(WIFI_SSID_DEBUG, WIFI_PASS_DEBUG);
@@ -245,7 +244,6 @@ void ButtonTasks(void *pvParameters) {
                 alarmEnabled = !alarmEnabled;
                 if (alarmEnabled) alarmFired = false;  // re-arm when enabling
                 xSemaphoreGive(AlarmMutex);
-                backgroundNeedsRedraw = true;
             }
         }
 
@@ -256,10 +254,14 @@ void ButtonTasks(void *pvParameters) {
             lbLongFired = false;
         }
         if (lbHeld && curLeftBottom) {
-            if (!lbLongFired && (millis() - lbPressTime >= 5000)) {
+            if (!lbLongFired && (millis() - lbPressTime >= 1000)) {
+                // long press, alarm was not running switch page
                 lbLongFired = true;
-                Serial.println("Entering OTA Mode");
-                Configure_OTA_WIFI();       //enable WiFi and block here until new credentials are entered
+                xSemaphoreTake(stateMutex, portMAX_DELAY);
+                currentPage = (currentPage == PAGE_MAIN) ? PAGE_ALARM : PAGE_MAIN;
+                xSemaphoreGive(stateMutex);
+                backgroundNeedsRedraw = true;
+                Serial.println(currentPage == PAGE_MAIN ? "Page: MAIN" : "Page: ALARM");
             }
         }
         if (releasedLeftBottom) {
@@ -272,14 +274,6 @@ void ButtonTasks(void *pvParameters) {
             }
             xSemaphoreGive(AlarmMutex);
 
-            if (!lbLongFired && !running) {
-                // Short press, alarm was not running → switch page
-                xSemaphoreTake(stateMutex, portMAX_DELAY);
-                currentPage = (currentPage == PAGE_MAIN) ? PAGE_ALARM : PAGE_MAIN;
-                xSemaphoreGive(stateMutex);
-                backgroundNeedsRedraw = true;
-                Serial.println(currentPage == PAGE_MAIN ? "Page: MAIN" : "Page: ALARM");
-            }
             lbHeld = false;
         }
 
@@ -292,7 +286,6 @@ void ButtonTasks(void *pvParameters) {
                 alarmHour = (alarmHour + 1) % 24;
                 alarmFired = false;   // time changed, re-arm
                 xSemaphoreGive(AlarmMutex);
-                backgroundNeedsRedraw = true;
             }
         }
 
@@ -305,8 +298,13 @@ void ButtonTasks(void *pvParameters) {
                 alarmMinute = (alarmMinute + 2) % 60;
                 alarmFired  = false;   // time changed, re-arm
                 xSemaphoreGive(AlarmMutex);
-                backgroundNeedsRedraw = true;
             }
+        }
+
+        // ── enter config mode ─────────────────────────────────────────────
+        if (pressedLeftBottom && pressedRightBottom) {
+            Serial.println("Entering OTA Mode");
+            Configure_WIFI();       //enable WiFi and block here until new credentials are entered
         }
 
         prevLeftTop     = curLeftTop;
@@ -370,10 +368,13 @@ void AlarmTasks(void *pvParameters) {
 
         // Reset alarmFired when minute advances past the alarm minute
         if (aFired && timeOkk) {
+            // stop alarm after 1 minutes of play
             if (timeinfo.tm_hour != aHour || timeinfo.tm_min != aMin) {
                 xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                alarmFired = false;
+                alarmRunning = false;
+                alarmFired   = true;   // prevent re-fire this minute
                 xSemaphoreGive(AlarmMutex);
+                
             }
         }
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -395,15 +396,12 @@ void UITasks(void *pvParameters) {
         bool acOn    = ACState;
         Page page    = currentPage;
         xSemaphoreGive(stateMutex);
-
-        //always clear the canvas first
-        //k10.canvas->canvasClear(13); doesnt work
-        k10.canvas->clearLocalCanvas(0, 0, 240, 320);   // full clear before redraw
         
         // ── Redraw background only on page change ─────────────────────────
-        if (backgroundNeedsRedraw || page != lastDrawnPage) {
+        if (backgroundNeedsRedraw) {
+            //k10.canvas->canvasClear(13); doesnt work
+            k10.canvas->clearLocalCanvas(0, 0, 240, 320);   // full clear before redraw
             k10.setScreenBackground(0x2C4C9C);
-            lastDrawnPage         = page;
             backgroundNeedsRedraw = false;
         }
 
@@ -451,19 +449,27 @@ void UITasks(void *pvParameters) {
 
             k10.canvas->canvasLine(10, 191, 230, 191, 0xFFFFFF);
 
-            lightIntensity = k10.readALS();
-            setBacklight(lightIntensity);
+            lightIntensity = k10.readALS(); // measure ambient light for backlight control and display on UI
+            //refresh backlight every 2 seconds
+            static unsigned long lastBacklightUpdate = 0;
+            if (millis() - lastBacklightUpdate >= 2000) {
+                lastBacklightUpdate = millis();
+                setBacklight(lightIntensity);   // also update the backlight duty cycle based on the current ambient light level
+            }
 
-            sensors_event_t humidity_event, temp_event;
-            aht.getEvent(&humidity_event, &temp_event);
-
+            sensors_event_t humidity_event, temp_event; // local variables to hold sensor readings
+            aht.getEvent(&humidity_event, &temp_event); // store current humidity and temperature readings
+            
+            //draw intensity lines on main screen
             const int BAR_Y = 200;
             drawVerticalBar( 10, BAR_Y, (float)lightIntensity,              0, 400, "Lux", "",  10);
             drawVerticalBar( 90, BAR_Y, humidity_event.relative_humidity,   0, 100, "Hum", "%", 10);
-            drawVerticalBar(170, BAR_Y, temp_event.temperature,             0,  50, "Tmp", "C", 10);
+            drawVerticalBar(170, BAR_Y, temp_event.temperature - 8,             0,  70, "Tmp", "C", 10); // counter the offset in temperature readings, probably due to heat from the device itself.
 
+            // draw a line and the alarm status at the bottom of the main page (even when WiFi is down, using cached alarm state)
             k10.canvas->canvasLine(10, 257, 230, 257, 0xFFFFFF);
 
+            // Display alarm time and status at the bottom of main screen
             char alarmHint[24];
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             snprintf(alarmHint, sizeof(alarmHint), " Alarm %02d:%02d %s",
@@ -528,7 +534,7 @@ void setup() {
     configTime(6 * 3600, 0, "pool.ntp.org", "time.nist.gov");
 
     // ── ASR ───────────────────────────────────────────────────────────────
-    asr.asrInit(0, EN_MODE, 5000);
+    asr.asrInit(1, EN_MODE, 3000);
     while (asr._asrState == 0) {
         Serial.print('.');
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -548,8 +554,6 @@ void setup() {
     pinMode(TriacFan,   OUTPUT);
     digital_write(TriacLight, LOW);
     digital_write(TriacFan,   LOW);
-    //pinMode(BaclLED, OUTPUT);
-    //digital_write(BaclLED, HIGH);  // turn on backlight
 
     // ── Display ───────────────────────────────────────────────────────────
     k10.initScreen(screen_dir);
@@ -578,5 +582,5 @@ void setup() {
 // LOOP ( 8kb in size)
 // ─────────────────────────────────────────────────────────────────────────────
 void loop() {
-    vTaskDelay(pdMS_TO_TICKS(200));
+    vTaskDelay(pdMS_TO_TICKS(10));
 }

@@ -1,3 +1,7 @@
+//this is the code to send the IR signal to the AC unit, this code is based on the IRsend example provided by the IRremoteESP8266 library, but it has been modified to work with the ESP32-C3 and to use a larger capture buffer size and a longer timeout value to capture more complex messages. The code also includes some tunable parameters that can be adjusted to improve the accuracy of the decoding process.
+//this is not the part of the main code.
+//ignore this code
+
 // #include "unihiker_k10.h"
 
 // #include <Arduino.h>
