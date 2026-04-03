@@ -390,7 +390,13 @@
       "dashed_lines_gap_length_ratio": 3.0,
       "default_line_thickness": 6.0,
       "default_text_size": 50.0,
-      "field_names": [],
+      "field_names": [
+        {
+          "name": "Untitled Field",
+          "url": false,
+          "visible": false
+        }
+      ],
       "intersheets_ref_own_page": false,
       "intersheets_ref_prefix": "",
       "intersheets_ref_short": false,
@@ -413,7 +419,7 @@
     },
     "net_format_name": "",
     "page_layout_descr_file": "",
-    "plot_directory": "",
+    "plot_directory": "C:/Users/Alamin/My Drive (alaminashik890.bd@gmail.com)/Skills and works/Instructables/Multi purpose AI home automation socket/Github/Multipurpose-Home-Automation-Socket-Using-Unihiker-K10/circuit/Main circuit V1.0/",
     "space_save_all_events": true,
     "spice_current_sheet_as_root": false,
     "spice_external_command": "spice \"%I\"",

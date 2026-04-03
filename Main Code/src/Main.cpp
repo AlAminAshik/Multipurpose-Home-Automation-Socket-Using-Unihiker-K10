@@ -1,5 +1,4 @@
 #include "unihiker_k10.h"
-#include <IRremoteESP8266.h>
 #include <IRsend.h>
 #include "asr.h"
 #include <WiFi.h>
@@ -46,13 +45,14 @@ uint16_t AC_OFFrawData[197] = {6094, 7330,  618, 1654,  620, 1650,  614, 1650,  
 #define TriacLight        eP9
 #define TriacFan          eP10
 //#define BaclLED           eLCD_BLK    //using this pin blocks voice, idk why
+uint8_t fanSpeed = 4; // fan speed changes from 0 to 4
 
 // ── Page enum ─────────────────────────────────────────────────────────────────
 enum Page { PAGE_MAIN, PAGE_ALARM};
 static volatile Page currentPage = PAGE_MAIN;
 
 // Alarm state ───────────────────────────────────────────────────────────────
-static volatile int  alarmHour    = 0;
+static volatile int  alarmHour    = 6;  // default alarm time 6:00 AM, can be changed via buttons on the alarm page
 static volatile int  alarmMinute  = 0;
 static volatile bool alarmEnabled = false;
 static volatile bool alarmFired   = false;
@@ -64,7 +64,6 @@ static bool alarmSoundActive = false;
 static volatile bool TriacLightState = false;
 static volatile bool TriacFanState   = false;
 static volatile bool ACState         = false;
-static volatile bool backLightState  = false;
 
 // Semaphores / mutexes ──────────────────────────────────────────────────────
 static SemaphoreHandle_t stateMutex = NULL;  // protects appliance states + page
@@ -85,9 +84,45 @@ void toggleLight() {
 // ─────────────────────────────────────────────────────────────────────────────
 void toggleFan() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    TriacFanState = !TriacFanState;
-    digital_write(TriacFan, TriacFanState ? HIGH : LOW);
+    TriacFanState = !TriacFanState; //only triggers the RunFanSpeed active/inactive
     xSemaphoreGive(stateMutex);
+}
+
+void RunFanSpeed(uint8_t speed){
+    static bool optoState = false;  //must be static
+    long optoOnTime;  // Time optocoupler in on
+    long optoOffTime;  // Time optocoupler is off 
+
+    static unsigned long lastToggle = 0;
+    unsigned long now = millis();
+
+    switch (speed) {
+        case 0: //off
+            digital_write(TriacFan, LOW); // fully off
+            return;
+        case 1: //low
+            optoOnTime = 100;
+            optoOffTime = 200;
+            break;
+        case 2: //medium
+            optoOnTime = 200;
+            optoOffTime = 100;
+            break;
+        case 3: //high
+            optoOnTime = 300;
+            optoOffTime = 80;
+            break;
+        case 4: //full on
+            digital_write(TriacFan, HIGH);
+            return;
+    }
+    long interval = optoState ? optoOnTime : optoOffTime;
+
+    if (now - lastToggle >= interval && speed != 4) {
+        lastToggle = now;
+        optoState = !optoState;
+        digital_write(TriacFan, optoState); // Toggle the fan state
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,7 +132,6 @@ void toggleAC() {
     xSemaphoreGive(stateMutex);
 
     xSemaphoreTake(irMutex, portMAX_DELAY);
-
     //suspend all other tasks on this code during transmission (very important)
     vTaskSuspendAll();
     if (newState) {
@@ -180,16 +214,20 @@ void VoiceTasks(void *pvParameters) {
         }
         if (asr.isDetectCmdID(0+1)) {
             asr._isDetectCmdID = 0;
+            music.playMusic(Melodies::BA_DING, OnceInBackground);
             toggleLight();
         } else if (asr.isDetectCmdID(1+1)) {
             asr._isDetectCmdID = 0;
+            music.playMusic(Melodies::BA_DING, OnceInBackground);
             toggleFan();
         } else if (asr.isDetectCmdID(2+1)) {
             asr._isDetectCmdID = 0;
+            music.playMusic(Melodies::BA_DING, OnceInBackground);
             toggleAC();
         }
         else if (asr.isDetectCmdID(3+1)) {
             asr._isDetectCmdID = 0;
+            music.playMusic(Melodies::BA_DING, OnceInBackground);
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             currentPage = PAGE_ALARM;
             xSemaphoreGive(stateMutex);
@@ -197,10 +235,27 @@ void VoiceTasks(void *pvParameters) {
         }
         else if (asr.isDetectCmdID(4+1)) {
             asr._isDetectCmdID = 0;
+            music.playMusic(Melodies::BA_DING, OnceInBackground);
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             currentPage = PAGE_MAIN;
             xSemaphoreGive(stateMutex);
             backgroundNeedsRedraw = true;
+        }
+        else if (asr.isDetectCmdID(5+1)) {
+            asr._isDetectCmdID = 0;
+            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            fanSpeed = 4; // full speed
+            xSemaphoreGive(stateMutex);
+            Serial.println("Fan set to full speed via voice command");
+        }
+        else if (asr.isDetectCmdID(6+1)) {
+            asr._isDetectCmdID = 0;
+            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            fanSpeed = 1; // low speed
+            xSemaphoreGive(stateMutex);
+            Serial.println("Fan set to low speed via voice command");
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -228,15 +283,16 @@ void ButtonTasks(void *pvParameters) {
         bool pressedLeftBottom  = curLeftBottom  && !prevLeftBottom;
         bool pressedRightTop    = curRightTop    && !prevRightTop;
         bool pressedRightBottom = curRightBottom && !prevRightBottom;
-        bool releasedLeftBottom = !curLeftBottom &&  prevLeftBottom;
+        bool releasedLeftTop = !curLeftTop &&  prevLeftTop;
 
         Page page;
         xSemaphoreTake(stateMutex, portMAX_DELAY);
         page = currentPage;
         xSemaphoreGive(stateMutex);
 
-        // ── LeftTopButton ─────────────────────────────────────────────────
-        if (pressedLeftTop) {
+        // ── LeftBottomButton ─────────────────────────────────────────────────
+        // AC functionality in main page and alarm toggle in alarm page
+        if (pressedLeftBottom) {
             if (page == PAGE_MAIN) {
                 toggleAC();
             } else {
@@ -247,13 +303,28 @@ void ButtonTasks(void *pvParameters) {
             }
         }
 
-        // ── LeftBottomButton ──────────────────────────────────────────────
-        if (pressedLeftBottom) {
+        // ── RightBottomButton ─────────────────────────────────────────────
+        // toggle fan in home page and increase minute in alarm page
+        if (pressedRightBottom) {
+            if (page == PAGE_MAIN) {
+                toggleFan();
+            } else {
+                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+                alarmMinute = (alarmMinute + 2) % 60;
+                alarmFired  = false;   // time changed, re-arm
+                xSemaphoreGive(AlarmMutex);
+            }
+        }
+
+        // ── LeftTopButton ──────────────────────────────────────────────
+        // switch pages and alarm off in both pages with long-press and short-press respectively and speed control
+        if (pressedLeftTop) {
             lbHeld      = true;
             lbPressTime = millis();
             lbLongFired = false;
         }
-        if (lbHeld && curLeftBottom) {
+        //if pressed for long time, toggle page. if released before long-press threshold, toggle alarm (if on alarm page) or change fan speed (if on main page)
+        if (lbHeld && curLeftTop) {
             if (!lbLongFired && (millis() - lbPressTime >= 1000)) {
                 // long press, alarm was not running switch page
                 lbLongFired = true;
@@ -264,20 +335,29 @@ void ButtonTasks(void *pvParameters) {
                 Serial.println(currentPage == PAGE_MAIN ? "Page: MAIN" : "Page: ALARM");
             }
         }
-        if (releasedLeftBottom) {
+        // short press action (only if not long-pressed): toggle alarm if on alarm page, change fan speed if on main page
+        if (releasedLeftTop) {
             // Dismiss alarm if running (check before page-toggle)
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             bool running = alarmRunning;
             if (running) {
-                alarmRunning = false;
+                alarmRunning = false;   //stop alarm
                 alarmFired   = true;   // prevent re-fire this minute
             }
             xSemaphoreGive(AlarmMutex);
+
+            //change speed of fan at short presses when fan is on.
+            if (page == PAGE_MAIN && TriacFanState == true) {
+                xSemaphoreTake(stateMutex, portMAX_DELAY);
+                fanSpeed = (fanSpeed % 4) + 1;  // cycle through 1,2,3,4 (0 is off, 4 is full on)
+                xSemaphoreGive(stateMutex);
+            }
 
             lbHeld = false;
         }
 
         // ── RightTopButton ────────────────────────────────────────────────
+        // toggle light in home page and increase hour in alarm page
         if (pressedRightTop) {
             if (page == PAGE_MAIN) {
                 toggleLight();
@@ -285,18 +365,6 @@ void ButtonTasks(void *pvParameters) {
                 xSemaphoreTake(AlarmMutex, portMAX_DELAY);
                 alarmHour = (alarmHour + 1) % 24;
                 alarmFired = false;   // time changed, re-arm
-                xSemaphoreGive(AlarmMutex);
-            }
-        }
-
-        // ── RightBottomButton ─────────────────────────────────────────────
-        if (pressedRightBottom) {
-            if (page == PAGE_MAIN) {
-                toggleFan();
-            } else {
-                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                alarmMinute = (alarmMinute + 2) % 60;
-                alarmFired  = false;   // time changed, re-arm
                 xSemaphoreGive(AlarmMutex);
             }
         }
@@ -312,7 +380,19 @@ void ButtonTasks(void *pvParameters) {
         prevRightTop    = curRightTop;
         prevRightBottom = curRightBottom;
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        //vTaskDelay(pdMS_TO_TICKS(20));
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+        bool triacfanstatee = TriacFanState;
+        uint8_t fanspeede = fanSpeed;
+        xSemaphoreGive(stateMutex);
+
+        // Run fan speed control in button task for more responsive control since it uses timing-based control
+        if(triacfanstatee){
+            RunFanSpeed(fanspeede);  // from speed 1 to 4
+        }
+        else{
+            RunFanSpeed(0); // fully off
+        }
     }
 }
 
@@ -367,15 +447,12 @@ void AlarmTasks(void *pvParameters) {
         }
 
         // Reset alarmFired when minute advances past the alarm minute
-        if (aFired && timeOkk) {
-            // stop alarm after 1 minutes of play
-            if (timeinfo.tm_hour != aHour || timeinfo.tm_min != aMin) {
-                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                alarmRunning = false;
-                alarmFired   = true;   // prevent re-fire this minute
-                xSemaphoreGive(AlarmMutex);
-                
-            }
+        // stop alarm after 3 minutes of play
+        if (timeinfo.tm_hour != aHour || timeinfo.tm_min == aMin + 3) {
+            xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+            alarmRunning = false;
+            alarmFired   = true;   // prevent re-fire this minute
+            xSemaphoreGive(AlarmMutex); 
         }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -437,7 +514,7 @@ void UITasks(void *pvParameters) {
         // ─────────────────────────────────────────────────────────────────────────────
         if (page == PAGE_MAIN) {
             k10.canvas->canvasText(" [LIGHT]",   3, 0xFFFFFF);
-            k10.canvas->canvasText("    [FAN]",  5, 0xFFFFFF);
+            k10.canvas->canvasText("  [FAN] (" + String(fanSpeed) + ")",  5, 0xFFFFFF);
             k10.canvas->canvasText("      [AC]", 7, 0xFFFFFF);
 
             k10.canvas->canvasDrawBitmap(127,  53, RED_OFF_SWITCH_WIDTH, RED_OFF_SWITCH_HEIGHT,
@@ -499,10 +576,10 @@ void UITasks(void *pvParameters) {
                                    aEnabled ? 0x00FF88 : 0xFF4444,
                                    k10.canvas->eCNAndENFont24, 8, true);
             k10.canvas->canvasLine(10, 227, 230, 227, 0xFFFFFF);
-            k10.canvas->canvasText("[<] Back",    10, 295, 0xFFFFFF, k10.canvas->eCNAndENFont16,  8, false);
+            k10.canvas->canvasText("[A] Toggle",    10, 295, 0xFFFFFF, k10.canvas->eCNAndENFont16,  10, false);
             k10.canvas->canvasText("Hr [^]",     185, 235, 0xFFFFFF, k10.canvas->eCNAndENFont16,  6, false);
             k10.canvas->canvasText("Min [^]",    185, 295, 0xFFFFFF, k10.canvas->eCNAndENFont16,  7, false);
-            k10.canvas->canvasText("[A] Toggle",  10, 235, 0xFFFFFF, k10.canvas->eCNAndENFont16, 10, false);
+            k10.canvas->canvasText("[<] Back",  10, 235, 0xFFFFFF, k10.canvas->eCNAndENFont16, 8, false);
         }
 
         k10.canvas->updateCanvas();
@@ -539,11 +616,14 @@ void setup() {
         Serial.print('.');
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    asr.addASRCommand(0+1, const_cast<char*>("lights"));
-    asr.addASRCommand(1+1, const_cast<char*>("fan"));
-    asr.addASRCommand(2+1, const_cast<char*>("ac"));
-    asr.addASRCommand(3+1, const_cast<char*>("show alarm"));
-    asr.addASRCommand(4+1, const_cast<char*>("hide alarm"));
+    asr.addASRCommand(0+1, const_cast<char*>("Lights"));
+    asr.addASRCommand(1+1, const_cast<char*>("Fan"));
+    asr.addASRCommand(2+1, const_cast<char*>("AC"));
+    asr.addASRCommand(3+1, const_cast<char*>("Show Alarm"));
+    asr.addASRCommand(4+1, const_cast<char*>("Hide Alarm"));
+    asr.addASRCommand(5+1, const_cast<char*>("Fan Full Speed"));
+    asr.addASRCommand(6+1, const_cast<char*>("Fan Low Speed"));
+
 
     // ── GPIO ──────────────────────────────────────────────────────────────
     pinMode(LeftTopButton,    INPUT_PULLDOWN);
@@ -579,8 +659,8 @@ void setup() {
     xTaskCreatePinnedToCore(AlarmTasks, "AlarmTasks", 1024*5, NULL, 5, NULL, 1);
 }
 
-// LOOP ( 8kb in size)
+// LOOP ( 8kb in size) core 1
 // ─────────────────────────────────────────────────────────────────────────────
 void loop() {
-    vTaskDelay(pdMS_TO_TICKS(10));
+ vTaskDelay(pdMS_TO_TICKS(10));
 }
