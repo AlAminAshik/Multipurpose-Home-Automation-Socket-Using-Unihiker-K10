@@ -1,7 +1,7 @@
 # Multipurpose-Home-Automation-Socket-Using-Unihiker-K10
 This repo contains all the coding and circuit diagram related to my home automation project using unihiker K10 
 
-![Alt text](Graphics/device annotated.png)
+![Alt text](Graphics/device_annotated.png)
 
 Imagine controlling your light, fan, alarm, and even AC using voice without the need for wifi or a phone.
 
@@ -32,7 +32,7 @@ In this project, I will describe in detail all the processes of making such a de
 * Some resistors and wires
 
 # What it does?
-![Alt text](Graphics/device annotated working.png)
+![Alt text](Graphics/device_annotated_working.png)
 I wanted to make a very practical project. With that in mind, I added multiple features. They are:
 
 ### Two Pages:
@@ -72,7 +72,7 @@ I wanted to make a very practical project. With that in mind, I added multiple f
     - Responds to voice commands: Same as Home page.
 
 # 3D Files
-![Alt text](Graphics/3d ss.png)
+![Alt text](Graphics/3d_ss.png)
 
 The 3d structure is made using Fusion360, you can get the file from this link: https://a360.co/4cmEmkP
 
