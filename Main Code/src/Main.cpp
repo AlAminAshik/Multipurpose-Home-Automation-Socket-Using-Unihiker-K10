@@ -61,7 +61,7 @@ int pageSwitchPressTime = 1000; // 1 second press on the mode button changes to 
 // Alarm state ───────────────────────────────────────────────────────────────
 static volatile int  alarmHour    = 6;  // default alarm time 6:00 AM, can be changed via buttons on the alarm page
 static volatile int  alarmMinute  = 0;
-static volatile bool alarmEnabled = false;
+static volatile bool alarmEnabled = true;
 static volatile bool alarmFired   = false;
 static volatile bool alarmRunning = false;
 // Local variable to track whether we already started the alarm sound
@@ -327,6 +327,19 @@ void ButtonTasks(void *pvParameters) {
             }
         }
 
+        // ── RightTopButton ────────────────────────────────────────────────
+        // toggle light in home page and increase hour in alarm page
+        if (pressedRightTop) {
+            if (page == PAGE_MAIN) {
+                toggleLight();
+            } else {
+                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+                alarmHour = (alarmHour + 1) % 24;
+                alarmFired = false;   // time changed, re-arm
+                xSemaphoreGive(AlarmMutex);
+            }
+        }
+
         // ── LeftTopButton ──────────────────────────────────────────────
         // switch pages and alarm off in both pages with long-press and short-press respectively and speed control
         if (pressedLeftTop) {
@@ -358,7 +371,7 @@ void ButtonTasks(void *pvParameters) {
             xSemaphoreGive(AlarmMutex);
 
             //change speed of fan at short presses when fan is on.
-            if (page == PAGE_MAIN && TriacFanState == true) {
+            if (page == PAGE_MAIN && TriacFanState == true && !lbLongFired) {
                 xSemaphoreTake(stateMutex, portMAX_DELAY);
                 fanSpeed = (fanSpeed % 4) + 1;  // cycle through 1,2,3,4 (0 is off, 4 is full on)
                 xSemaphoreGive(stateMutex);
@@ -367,18 +380,6 @@ void ButtonTasks(void *pvParameters) {
             lbHeld = false;
         }
 
-        // ── RightTopButton ────────────────────────────────────────────────
-        // toggle light in home page and increase hour in alarm page
-        if (pressedRightTop) {
-            if (page == PAGE_MAIN) {
-                toggleLight();
-            } else {
-                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                alarmHour = (alarmHour + 1) % 24;
-                alarmFired = false;   // time changed, re-arm
-                xSemaphoreGive(AlarmMutex);
-            }
-        }
 
         // ── enter config mode ─────────────────────────────────────────────
         if (pressedLeftBottom && pressedRightBottom) {
@@ -527,6 +528,7 @@ void UITasks(void *pvParameters) {
             // k10.canvas->canvasText(" [LIGHT]",   3, 0xFFFFFF);
             // k10.canvas->canvasText("  [FAN] (" + String(fanSpeed) + ")",  5, 0xFFFFFF);
             // k10.canvas->canvasText("      [AC]", 7, 0xFFFFFF);
+            k10.canvas->canvasText("[" + String(fanSpeed) + "]", 210, 101, 0xFFFFFF, k10.canvas->eCNAndENFont24, 11, true);
             k10.canvas->canvasDrawBitmap(16, 43, LIGHT_ICON_WIDTH, LIGHT_ICON_HEIGHT, light_icon);
             k10.canvas->canvasDrawBitmap(16, 93, FAN_ICON_WIDTH, FAN_ICON_HEIGHT, FAN_icon);
             k10.canvas->canvasDrawBitmap(16, 143, AC_ICON_WIDTH, AC_ICON_HEIGHT, AC_icon);
