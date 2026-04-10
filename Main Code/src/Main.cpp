@@ -14,6 +14,9 @@
 #include "alarmLogo.h"
 #include "noWifiIcon.h"
 #include "wifiIcon.h"
+#include "lightIcon.h"
+#include "fanIcon.h"
+#include "ACIcon.h"
 
 Adafruit_AHTX0 aht;
 WiFiManager wm;
@@ -23,17 +26,20 @@ WiFiManager wm;
 #define WIFI_SSID_DEBUG "Smart Socket by Alamin"
 #define WIFI_PASS_DEBUG "87654321"
 
+// Backlight and display ─────────────────────────────────────────────────────────────────────────────
 UNIHIKER_K10 k10;
 uint8_t screen_dir = 2;
 uint16_t lightIntensity;
 #define BackLED P1  //this pin was soldered with the backled transistor of the display since eLCD_BLK pin interferes with the voice
+int minLightIntensity = 2; // less than 2 lux the screen with turn off
+int maxLightIntensity = 15; // more than 15 lux the screen will be at full brightness
 
 ASR   asr;
 Music music;
 
+// IR Data ─────────────────────────────────────────────────────────────────────────────
 const uint16_t kIrLed = P0; // this pin was soldered with the IR LED on the back of the board
 IRsend irsend(kIrLed);
-
 uint16_t AC_ONrawData[197]  = {6058, 7340,  608, 1684,  586, 1684,  584, 1682,  586, 1682,  586, 1682,  584, 1684,  586, 1684,  586, 1682,  586, 564,  586, 566,  582, 568,  584, 566,  584, 566,  584, 566,  584, 564,  586, 566,  582, 1684,  584, 1686,  582, 1684,  584, 1684,  582, 1688,  582, 1684,  584, 1686,  582, 1684,  584, 566,  586, 564,  582, 566,  584, 574,  576, 566,  584, 574,  576, 566,  584, 566,  586, 1684,  582, 1692,  578, 1682,  586, 1682,  584, 1684,  584, 1682,  584, 1684,  584, 1684,  586, 564,  584, 566,  586, 564,  586, 566,  584, 568,  584, 564,  584, 566,  586, 564,  582, 1688,  584, 564,  586, 564,  586, 1684,  584, 564,  586, 564,  586, 562,  586, 1682,  586, 564,  586, 1684,  584, 1684,  582, 566,  582, 1686,  588, 1680,  558, 1710,  586, 564,  584, 1686,  582, 1684,  584, 576,  576, 568,  580, 1686,  586, 564,  584, 1684,  582, 1684,  584, 568,  586, 564,  584, 1684,  584, 1684,  586, 562,  586, 1684,  582, 566,  586, 564,  586, 564,  586, 1684,  584, 564,  584, 1692,  574, 568,  586, 1682,  584, 568,  584, 1682,  586, 1684,  584, 566,  586, 1684,  584, 566,  582, 1686,  582, 566,  584, 1684,  584, 564,  586, 7386,  586};
 uint16_t AC_OFFrawData[197] = {6094, 7330,  618, 1654,  620, 1650,  614, 1650,  620, 1654,  616, 1652,  616, 1650,  618, 1650,  618, 1650,  616, 536,  614, 536,  616, 536,  614, 538,  612, 536,  614, 534,  616, 536,  614, 536,  616, 1654,  614, 1650,  616, 1654,  616, 1654,  614, 1652,  616, 1654,  616, 1652,  612, 1658,  612, 534,  616, 534,  616, 538,  586, 562,  612, 538,  612, 536,  612, 540,  610, 536,  614, 1652,  616, 1652,  614, 1656,  612, 1654,  614, 1654,  616, 1652,  616, 1654,  614, 1650,  616, 536,  614, 536,  616, 534,  616, 534,  614, 534,  616, 536,  614, 534,  616, 536,  614, 1656,  614, 1654,  612, 536,  616, 1654,  612, 538,  614, 534,  616, 536,  614, 1654,  616, 536,  612, 536,  616, 1652,  612, 536,  588, 1682,  612, 1656,  612, 1654,  588, 566,  610, 1654,  612, 1658,  612, 540,  612, 538,  612, 1656,  612, 536,  586, 1684,  612, 1652,  612, 538,  616, 538,  610, 1654,  614, 1656,  612, 538,  614, 1654,  614, 536,  614, 536,  612, 536,  614, 1656,  612, 538,  612, 1654,  616, 536,  610, 1660,  612, 538,  612, 1652,  618, 1652,  614, 538,  612, 1656,  612, 536,  616, 1652,  614, 536,  614, 1652,  616, 536,  614, 7354,  618};
 
@@ -50,6 +56,7 @@ uint8_t fanSpeed = 4; // fan speed changes from 0 to 4
 // ── Page enum ─────────────────────────────────────────────────────────────────
 enum Page { PAGE_MAIN, PAGE_ALARM};
 static volatile Page currentPage = PAGE_MAIN;
+int pageSwitchPressTime = 1000; // 1 second press on the mode button changes to next page
 
 // Alarm state ───────────────────────────────────────────────────────────────
 static volatile int  alarmHour    = 6;  // default alarm time 6:00 AM, can be changed via buttons on the alarm page
@@ -59,6 +66,8 @@ static volatile bool alarmFired   = false;
 static volatile bool alarmRunning = false;
 // Local variable to track whether we already started the alarm sound
 static bool alarmSoundActive = false;
+// Alarm timeout
+int alarmDurationMins = 10; // 10 minutes
 
 // Shared appliance state ────────────────────────────────────────────────────
 static volatile bool TriacLightState = false;
@@ -72,7 +81,11 @@ static SemaphoreHandle_t AlarmMutex = NULL;  // protects alarm state
 
 //Page-change tracking (UI task only, no mutex needed) ─────────────────────
 static volatile bool backgroundNeedsRedraw = true;   // force draw on first frame
+uint32_t backGroundColor = 0x2C4C9C;
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 void toggleLight() {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -152,25 +165,23 @@ void toggleAC() {
 // ─────────────────────────────────────────────────────────────────────────────
 void setBacklight(uint16_t lux) {
     uint8_t duty;
-    if (lux < 2) {
+    if (lux < minLightIntensity) {
         duty = 0;           // display off
-    } else if (lux >= 15) {
+    } else if (lux >= maxLightIntensity) {
         duty = 255;         // full brightness
     } else {
         // linear ramp
-        // minimum 50 (not 0) so the screen is always barely visible at lux=2
-        duty = (uint8_t)(50 + ((lux - 2) * (255 - 50)) / (15 - 2));
+        // minimum 50 (not 0) so the screen is always barely visible at lux=minLightIntensity
+        duty = (uint8_t)(50 + ((lux - minLightIntensity) * (255 - 50)) / (maxLightIntensity - minLightIntensity));
     }
     ledcWrite(BackLED, duty);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper – draws a vertical bar gauge using pipe characters
-// x, y     = top-left of the bar area
-// value    = current reading
 // minVal, maxVal = scale range
-// label    = e.g. "Lux", "Hum", "Tmp"
-// unit     = e.g. "%", "C", ""
+// label    = "Lux", "Hum", "Tmp"
+// unit     = "%", "C", ""
 // barHeight = total number of '|' characters at full scale
 void drawVerticalBar(int x, int y, float value, float minVal, float maxVal, const char* label, const char* unit, int barHeight = 10) {
     // Clamp & compute how many filled bars
@@ -325,7 +336,7 @@ void ButtonTasks(void *pvParameters) {
         }
         //if pressed for long time, toggle page. if released before long-press threshold, toggle alarm (if on alarm page) or change fan speed (if on main page)
         if (lbHeld && curLeftTop) {
-            if (!lbLongFired && (millis() - lbPressTime >= 1000)) {
+            if (!lbLongFired && (millis() - lbPressTime >= pageSwitchPressTime)) {
                 // long press, alarm was not running switch page
                 lbLongFired = true;
                 xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -448,7 +459,7 @@ void AlarmTasks(void *pvParameters) {
 
         // Reset alarmFired when minute advances past the alarm minute
         // stop alarm after 3 minutes of play
-        if (timeinfo.tm_hour != aHour || timeinfo.tm_min == aMin + 3) {
+        if (timeinfo.tm_hour != aHour || timeinfo.tm_min == aMin + alarmDurationMins) {
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             alarmRunning = false;
             alarmFired   = true;   // prevent re-fire this minute
@@ -478,7 +489,7 @@ void UITasks(void *pvParameters) {
         if (backgroundNeedsRedraw) {
             //k10.canvas->canvasClear(13); doesnt work
             k10.canvas->clearLocalCanvas(0, 0, 240, 320);   // full clear before redraw
-            k10.setScreenBackground(0x2C4C9C);
+            k10.setScreenBackground(backGroundColor);
             backgroundNeedsRedraw = false;
         }
 
@@ -513,9 +524,13 @@ void UITasks(void *pvParameters) {
         // DRAW: MAIN PAGE  — runs regardless of WiFi status
         // ─────────────────────────────────────────────────────────────────────────────
         if (page == PAGE_MAIN) {
-            k10.canvas->canvasText(" [LIGHT]",   3, 0xFFFFFF);
-            k10.canvas->canvasText("  [FAN] (" + String(fanSpeed) + ")",  5, 0xFFFFFF);
-            k10.canvas->canvasText("      [AC]", 7, 0xFFFFFF);
+            // k10.canvas->canvasText(" [LIGHT]",   3, 0xFFFFFF);
+            // k10.canvas->canvasText("  [FAN] (" + String(fanSpeed) + ")",  5, 0xFFFFFF);
+            // k10.canvas->canvasText("      [AC]", 7, 0xFFFFFF);
+            k10.canvas->canvasDrawBitmap(16, 43, LIGHT_ICON_WIDTH, LIGHT_ICON_HEIGHT, light_icon);
+            k10.canvas->canvasDrawBitmap(16, 93, FAN_ICON_WIDTH, FAN_ICON_HEIGHT, FAN_icon);
+            k10.canvas->canvasDrawBitmap(16, 143, AC_ICON_WIDTH, AC_ICON_HEIGHT, AC_icon);
+
 
             k10.canvas->canvasDrawBitmap(127,  53, RED_OFF_SWITCH_WIDTH, RED_OFF_SWITCH_HEIGHT,
                 lightOn ? greenbutton : Red_off_switch);
@@ -639,7 +654,7 @@ void setup() {
     k10.initScreen(screen_dir);
     k10.creatCanvas();
     k10.canvas->canvasSetLineWidth(1);
-    k10.setScreenBackground(0x2C4C9C);   // draw background once at startup
+    k10.setScreenBackground(backGroundColor);   // draw background once at startup
     
     //setup backlight PWM (display backlight is wired to P1 via a transistor, so we can use PWM to control brightness if desired. For now we just turn it fully on)
     ledcSetup(2, 5000, 8);  // channel 0, 5 KHz, 8-bit resolution
