@@ -103,8 +103,8 @@ void toggleFan() {
 
 void RunFanSpeed(uint8_t speed){
     static bool optoState = false;  //must be static
-    long optoOnTime;  // Time optocoupler in on
-    long optoOffTime;  // Time optocoupler is off 
+    uint16_t optoOnTime;  // Time optocoupler in on
+    uint16_t optoOffTime;  // Time optocoupler is off 
 
     static unsigned long lastToggle = 0;
     unsigned long now = millis();
@@ -114,16 +114,22 @@ void RunFanSpeed(uint8_t speed){
             digital_write(TriacFan, LOW); // fully off
             return;
         case 1: //low
-            optoOnTime = 100;
-            optoOffTime = 200;
+             optoOnTime = 200;
+             optoOffTime = 300;
+            // optoOnTime = 2;
+            // optoOffTime = 8;            
             break;
         case 2: //medium
-            optoOnTime = 200;
-            optoOffTime = 100;
+            optoOnTime = 300;
+            optoOffTime = 200;
+            // optoOnTime = 4;
+            // optoOffTime = 6;
             break;
         case 3: //high
-            optoOnTime = 300;
-            optoOffTime = 80;
+            optoOnTime = 400;
+            optoOffTime = 120;
+            // optoOnTime = 7;
+            // optoOffTime = 3;
             break;
         case 4: //full on
             digital_write(TriacFan, HIGH);
@@ -134,7 +140,7 @@ void RunFanSpeed(uint8_t speed){
     if (now - lastToggle >= interval && speed != 4) {
         lastToggle = now;
         optoState = !optoState;
-        digital_write(TriacFan, optoState); // Toggle the fan state
+        digital_write(TriacFan, optoState ? HIGH : LOW); // Toggle the fan state
     }
 }
 
@@ -172,7 +178,9 @@ void setBacklight(uint16_t lux) {
     } else {
         // linear ramp
         // minimum 50 (not 0) so the screen is always barely visible at lux=minLightIntensity
-        duty = (uint8_t)(50 + ((lux - minLightIntensity) * (255 - 50)) / (maxLightIntensity - minLightIntensity));
+        uint32_t range = maxLightIntensity - minLightIntensity;
+        uint32_t delta = lux - minLightIntensity;
+        duty = (uint8_t)(50 + (delta * (255 - 50)) / range);
     }
     ledcWrite(BackLED, duty);
 }
@@ -601,6 +609,10 @@ void UITasks(void *pvParameters) {
 
         k10.canvas->updateCanvas();
         vTaskDelay(pdMS_TO_TICKS(100));
+
+        //see the task stack
+        UBaseType_t stackLeft = uxTaskGetStackHighWaterMark(NULL);
+        Serial.printf("UITasks free stack: %u words\n", stackLeft);
     }
 }
 
