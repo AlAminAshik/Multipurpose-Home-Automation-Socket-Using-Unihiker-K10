@@ -180,7 +180,7 @@ void setBacklight(uint16_t lux) {
         // minimum 50 (not 0) so the screen is always barely visible at lux=minLightIntensity
         uint32_t range = maxLightIntensity - minLightIntensity;
         uint32_t delta = lux - minLightIntensity;
-        duty = (uint8_t)(50 + (delta * (255 - 50)) / range);
+        duty = (uint16_t)(50 + (delta * (255 - 50)) / range);
     }
     ledcWrite(BackLED, duty);
 }
@@ -551,11 +551,12 @@ void UITasks(void *pvParameters) {
 
             k10.canvas->canvasLine(10, 191, 230, 191, 0xFFFFFF);
 
-            lightIntensity = k10.readALS(); // measure ambient light for backlight control and display on UI
             //refresh backlight every 2 seconds
             static unsigned long lastBacklightUpdate = 0;
             if (millis() - lastBacklightUpdate >= 2000) {
                 lastBacklightUpdate = millis();
+                uint16_t newlux = k10.readALS(); // measure ambient light for backlight control and display on UI
+                if (newlux > 0) lightIntensity = newlux; // update global light intensity if reading is valid (non-zero)
                 setBacklight(lightIntensity);   // also update the backlight duty cycle based on the current ambient light level
             }
 
