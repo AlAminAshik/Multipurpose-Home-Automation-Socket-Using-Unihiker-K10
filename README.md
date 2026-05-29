@@ -1,5 +1,7 @@
 # Multipurpose-Home-Automation-Socket-Using-Unihiker-K10
-This repo contains all the coding and circuit diagram related to my home automation project using unihiker K10 
+This repo contains all the coding and circuit diagram related to my home automation project using unihiker K10.
+
+Important fix: I found a bug in the Unihikerk10.cpp code, for the readALS() function. It uses a ratio to calculate the light intensity (_ratio = _als_ch1/(_als_ch0+_als_ch1);) At complete darkness both ch0 and ch1 can become 0 and the ratio becomes 0/0 which causes device to reset. Fix is to add a number with the denominator (_ratio = _als_ch1/(_als_ch0+_als_ch1+1))
 
 ![Alt text](Graphics/device_annotated.png)
 
