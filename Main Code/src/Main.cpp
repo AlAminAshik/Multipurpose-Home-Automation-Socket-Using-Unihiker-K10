@@ -67,7 +67,7 @@ static volatile bool alarmRunning = false;
 // Local variable to track whether we already started the alarm sound
 static bool alarmSoundActive = false;
 // Alarm timeout
-int alarmDurationMins = 10; // 10 minutes
+int alarmDurationMins = 60; // 60 minutes
 
 // Shared appliance state ────────────────────────────────────────────────────
 static volatile bool TriacLightState = false;
@@ -78,6 +78,8 @@ static volatile bool ACState         = false;
 static SemaphoreHandle_t stateMutex = NULL;  // protects appliance states + page
 static SemaphoreHandle_t irMutex    = NULL;  // protects irsend
 static SemaphoreHandle_t AlarmMutex = NULL;  // protects alarm state
+static SemaphoreHandle_t DisplayMutex = NULL; // protects display brightness
+uint8_t duty; // current backlight duty cycle (0-255)
 
 //Page-change tracking (UI task only, no mutex needed) ─────────────────────
 static volatile bool backgroundNeedsRedraw = true;   // force draw on first frame
@@ -115,21 +117,15 @@ void RunFanSpeed(uint8_t speed){
             return;
         case 1: //low
              optoOnTime = 200;
-             optoOffTime = 300;
-            // optoOnTime = 2;
-            // optoOffTime = 8;            
+             optoOffTime = 300;  
             break;
         case 2: //medium
             optoOnTime = 300;
             optoOffTime = 200;
-            // optoOnTime = 4;
-            // optoOffTime = 6;
             break;
         case 3: //high
             optoOnTime = 400;
             optoOffTime = 120;
-            // optoOnTime = 7;
-            // optoOffTime = 3;
             break;
         case 4: //full on
             digital_write(TriacFan, HIGH);
@@ -170,7 +166,7 @@ void toggleAC() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 void setBacklight(uint16_t lux) {
-    uint8_t duty;
+    xSemaphoreTake(DisplayMutex, portMAX_DELAY);
     if (lux < minLightIntensity) {
         duty = 0;           // display off
     } else if (lux >= maxLightIntensity) {
@@ -183,6 +179,7 @@ void setBacklight(uint16_t lux) {
         duty = (uint16_t)(50 + (delta * (255 - 50)) / range);
     }
     ledcWrite(BackLED, duty);
+    xSemaphoreGive(DisplayMutex);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -306,106 +303,117 @@ void ButtonTasks(void *pvParameters) {
 
         Page page;
         xSemaphoreTake(stateMutex, portMAX_DELAY);
-        page = currentPage;
+            page = currentPage;
         xSemaphoreGive(stateMutex);
+        xSemaphoreTake(DisplayMutex, portMAX_DELAY);
+            uint8_t dutyCopy = duty; // make a local copy of duty for decision making to avoid holding the mutex during long operations
+        xSemaphoreGive(DisplayMutex);
 
-        // ── LeftBottomButton ─────────────────────────────────────────────────
-        // AC functionality in main page and alarm toggle in alarm page
-        if (pressedLeftBottom) {
-            if (page == PAGE_MAIN) {
-                toggleAC();
-            } else {
+
+        //When buttons pressed
+        //turn display on if it is off
+        if ((pressedLeftBottom || pressedRightBottom || pressedLeftTop || pressedRightTop) && dutyCopy == 0) {
+            setBacklight(maxLightIntensity); // turn on to max brightness on button press if currently off for better visibility of UI during interaction, will auto-dim after 2 seconds based on ambient light
+        }
+        else{
+            // ── LeftBottomButton ─────────────────────────────────────────────────
+            // AC functionality in main page and alarm toggle in alarm page
+            if (pressedLeftBottom) {
+                if (page == PAGE_MAIN) {
+                    toggleAC();
+                } else {
+                    xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+                    alarmEnabled = !alarmEnabled;
+                    if (alarmEnabled) alarmFired = false;  // re-arm when enabling
+                    xSemaphoreGive(AlarmMutex);
+                }
+            }
+
+            // ── RightBottomButton ─────────────────────────────────────────────
+            // toggle fan in home page and increase minute in alarm page
+            if (pressedRightBottom) {
+                if (page == PAGE_MAIN) {
+                    toggleFan();
+                } else {
+                    xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+                    alarmMinute = (alarmMinute + 2) % 60;
+                    alarmFired  = false;   // time changed, re-arm
+                    xSemaphoreGive(AlarmMutex);
+                }
+            }
+
+            // ── RightTopButton ────────────────────────────────────────────────
+            // toggle light in home page and increase hour in alarm page
+            if (pressedRightTop) {
+                if (page == PAGE_MAIN) {
+                    toggleLight();
+                } else {
+                    xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+                    alarmHour = (alarmHour + 1) % 24;
+                    alarmFired = false;   // time changed, re-arm
+                    xSemaphoreGive(AlarmMutex);
+                }
+            }
+
+            // ── LeftTopButton ──────────────────────────────────────────────
+            // switch pages and alarm off in both pages with long-press and short-press respectively and speed control
+            if (pressedLeftTop) {
+                lbHeld      = true;
+                lbPressTime = millis();
+                lbLongFired = false;
+            }
+            //if pressed for long time, toggle page. if released before long-press threshold, toggle alarm (if on alarm page) or change fan speed (if on main page)
+            if (lbHeld && curLeftTop) {
+                if (!lbLongFired && (millis() - lbPressTime >= pageSwitchPressTime)) {
+                    // long press, alarm was not running switch page
+                    lbLongFired = true;
+                    xSemaphoreTake(stateMutex, portMAX_DELAY);
+                    currentPage = (currentPage == PAGE_MAIN) ? PAGE_ALARM : PAGE_MAIN;
+                    xSemaphoreGive(stateMutex);
+                    backgroundNeedsRedraw = true;
+                    Serial.println(currentPage == PAGE_MAIN ? "Page: MAIN" : "Page: ALARM");
+                }
+            }
+            // short press action (only if not long-pressed): toggle alarm if on alarm page, change fan speed if on main page
+            if (releasedLeftTop) {
+                // Dismiss alarm if running (check before page-toggle)
                 xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                alarmEnabled = !alarmEnabled;
-                if (alarmEnabled) alarmFired = false;  // re-arm when enabling
+                bool running = alarmRunning;
+                if (running) {
+                    alarmRunning = false;   //stop alarm
+                    alarmFired   = true;   // prevent re-fire this minute
+                }
                 xSemaphoreGive(AlarmMutex);
-            }
-        }
 
-        // ── RightBottomButton ─────────────────────────────────────────────
-        // toggle fan in home page and increase minute in alarm page
-        if (pressedRightBottom) {
-            if (page == PAGE_MAIN) {
-                toggleFan();
-            } else {
-                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                alarmMinute = (alarmMinute + 2) % 60;
-                alarmFired  = false;   // time changed, re-arm
-                xSemaphoreGive(AlarmMutex);
-            }
-        }
+                //change speed of fan at short presses when fan is on.
+                if (page == PAGE_MAIN && TriacFanState == true && !lbLongFired) {
+                    xSemaphoreTake(stateMutex, portMAX_DELAY);
+                    fanSpeed = (fanSpeed % 4) + 1;  // cycle through 1,2,3,4 (0 is off, 4 is full on)
+                    xSemaphoreGive(stateMutex);
+                }
 
-        // ── RightTopButton ────────────────────────────────────────────────
-        // toggle light in home page and increase hour in alarm page
-        if (pressedRightTop) {
-            if (page == PAGE_MAIN) {
-                toggleLight();
-            } else {
-                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                alarmHour = (alarmHour + 1) % 24;
-                alarmFired = false;   // time changed, re-arm
-                xSemaphoreGive(AlarmMutex);
-            }
-        }
-
-        // ── LeftTopButton ──────────────────────────────────────────────
-        // switch pages and alarm off in both pages with long-press and short-press respectively and speed control
-        if (pressedLeftTop) {
-            lbHeld      = true;
-            lbPressTime = millis();
-            lbLongFired = false;
-        }
-        //if pressed for long time, toggle page. if released before long-press threshold, toggle alarm (if on alarm page) or change fan speed (if on main page)
-        if (lbHeld && curLeftTop) {
-            if (!lbLongFired && (millis() - lbPressTime >= pageSwitchPressTime)) {
-                // long press, alarm was not running switch page
-                lbLongFired = true;
-                xSemaphoreTake(stateMutex, portMAX_DELAY);
-                currentPage = (currentPage == PAGE_MAIN) ? PAGE_ALARM : PAGE_MAIN;
-                xSemaphoreGive(stateMutex);
-                backgroundNeedsRedraw = true;
-                Serial.println(currentPage == PAGE_MAIN ? "Page: MAIN" : "Page: ALARM");
-            }
-        }
-        // short press action (only if not long-pressed): toggle alarm if on alarm page, change fan speed if on main page
-        if (releasedLeftTop) {
-            // Dismiss alarm if running (check before page-toggle)
-            xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-            bool running = alarmRunning;
-            if (running) {
-                alarmRunning = false;   //stop alarm
-                alarmFired   = true;   // prevent re-fire this minute
-            }
-            xSemaphoreGive(AlarmMutex);
-
-            //change speed of fan at short presses when fan is on.
-            if (page == PAGE_MAIN && TriacFanState == true && !lbLongFired) {
-                xSemaphoreTake(stateMutex, portMAX_DELAY);
-                fanSpeed = (fanSpeed % 4) + 1;  // cycle through 1,2,3,4 (0 is off, 4 is full on)
-                xSemaphoreGive(stateMutex);
+                lbHeld = false;
             }
 
-            lbHeld = false;
-        }
 
-
-        // ── enter config mode ─────────────────────────────────────────────
-        if (pressedLeftBottom && pressedRightBottom) {
-            Serial.println("Entering OTA Mode");
-            Configure_WIFI();       //enable WiFi and block here until new credentials are entered
+            // ── enter config mode ─────────────────────────────────────────────
+            if (pressedLeftBottom && pressedRightBottom) {
+                Serial.println("Entering OTA Mode");
+                Configure_WIFI();       //enable WiFi and block here until new credentials are entered
+            }
         }
 
         prevLeftTop     = curLeftTop;
         prevLeftBottom  = curLeftBottom;
         prevRightTop    = curRightTop;
         prevRightBottom = curRightBottom;
-
+        
+        //Fan control
         //vTaskDelay(pdMS_TO_TICKS(20));
         xSemaphoreTake(stateMutex, portMAX_DELAY);
         bool triacfanstatee = TriacFanState;
         uint8_t fanspeede = fanSpeed;
         xSemaphoreGive(stateMutex);
-
         // Run fan speed control in button task for more responsive control since it uses timing-based control
         if(triacfanstatee){
             RunFanSpeed(fanspeede);  // from speed 1 to 4
@@ -493,6 +501,7 @@ void UITasks(void *pvParameters) {
         bool acOn    = ACState;
         Page page    = currentPage;
         xSemaphoreGive(stateMutex);
+
         
         // ── Redraw background only on page change ─────────────────────────
         if (backgroundNeedsRedraw) {
@@ -553,7 +562,7 @@ void UITasks(void *pvParameters) {
 
             //refresh backlight every 2 seconds
             static unsigned long lastBacklightUpdate = 0;
-            if (millis() - lastBacklightUpdate >= 2000) {
+            if (millis() - lastBacklightUpdate >= 4000) {
                 lastBacklightUpdate = millis();
                 uint16_t newlux = k10.readALS(); // measure ambient light for backlight control and display on UI
                 if (newlux > 0) lightIntensity = newlux; // update global light intensity if reading is valid (non-zero)
@@ -630,6 +639,7 @@ void setup() {
     stateMutex = xSemaphoreCreateMutex();
     irMutex    = xSemaphoreCreateMutex();
     AlarmMutex = xSemaphoreCreateMutex();
+    DisplayMutex = xSemaphoreCreateMutex();
 
     // ── WiFi ──────────────────────────────────────────────────────────────
     WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -680,13 +690,14 @@ void setup() {
 
     // ── Tasks ─────────────────────────────────────────────────────────────
     Serial.print("Free heap before ButtonTasks: "); Serial.println(ESP.getFreeHeap());
-    xTaskCreatePinnedToCore(ButtonTasks, "ButtonTasks", 1024*8, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(ButtonTasks, "ButtonTasks", 1024*8, NULL, 10, NULL, 0);
     Serial.print("Free heap before VoiceTasks:  "); Serial.println(ESP.getFreeHeap());
     xTaskCreatePinnedToCore(VoiceTasks,  "VoiceTasks",  1024*3, NULL, 5, NULL, 1);
     Serial.print("Free heap before UITasks:     "); Serial.println(ESP.getFreeHeap());
     xTaskCreatePinnedToCore(UITasks,     "UITasks",     1024*8, NULL, 5, NULL, 1);
     Serial.print("Free heap before alarm tasks: "); Serial.println(ESP.getFreeHeap());
     xTaskCreatePinnedToCore(AlarmTasks, "AlarmTasks", 1024*5, NULL, 5, NULL, 1);
+    Serial.print("Free heap after alarm tasks: "); Serial.println(ESP.getFreeHeap());
 }
 
 // LOOP ( 8kb in size) core 1
