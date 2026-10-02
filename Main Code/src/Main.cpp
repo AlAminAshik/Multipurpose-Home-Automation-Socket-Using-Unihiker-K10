@@ -21,7 +21,7 @@
 Adafruit_AHTX0 aht;
 WiFiManager wm;
 
-#define WIFI_SSID       "Amin Residence GP"
+#define WIFI_SSID       "Amin Residence"
 #define WIFI_PASS       "alamiralif86"
 #define WIFI_SSID_DEBUG "Smart Socket by Alamin"
 #define WIFI_PASS_DEBUG "87654321"
@@ -196,14 +196,14 @@ void drawVerticalBar(int x, int y, float value, float minVal, float maxVal, cons
     // Draw label + numeric value above the bar
     char header[20];
     snprintf(header, sizeof(header), "%s:%.1f%s", label, value, unit);
-    k10.canvas->canvasText(header, x, y, 0xFFFFFF, k10.canvas->eCNAndENFont16, strlen(header), false);
+    k10.canvas->canvasText(header, x, y, 0xFFFFFF, k10.canvas->eCNAndENFont16, 10, true);
 
     // Build the bar string:  filled = '|',  empty = '.'
     char bar[barHeight + 1];
     for (int i = 0; i < barHeight; i++)
         bar[i] = (i < filled) ? '|' : '.';
     bar[barHeight] = '\0';
-    k10.canvas->canvasText(bar, x, y +18 , 0x00FF88, k10.canvas->eCNAndENFont24, barHeight, false);
+    k10.canvas->canvasText(bar, x, y +18 , 0x00FF88, k10.canvas->eCNAndENFont24, barHeight, true);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -398,6 +398,7 @@ void ButtonTasks(void *pvParameters) {
 
             // ── enter config mode ─────────────────────────────────────────────
             if (pressedLeftBottom && pressedRightBottom) {
+                music.playMusic(Melodies::BA_DING, OnceInBackground);
                 Serial.println("Entering OTA Mode");
                 Configure_WIFI();       //enable WiFi and block here until new credentials are entered
             }
@@ -453,34 +454,31 @@ void AlarmTasks(void *pvParameters) {
         aHour, aMin, alarmSoundActive);
 
         // ── Check alarm ───────────────────────────────────────────────────
-        if (aEnabled && timeOkk && !aFired && !aRunning) {
-            if (timeinfo.tm_hour == aHour && timeinfo.tm_min == aMin) {
-                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                alarmRunning = true;
-                xSemaphoreGive(AlarmMutex);
-                aRunning = true;
-            }
-        }
-        // Start looping sound when alarm begins
-        if (aRunning && !alarmSoundActive) {
-            music.playMusic(Melodies::ENTERTAINER, ForeverInBackground);  // loop until stopped
-            alarmSoundActive = true;
+          static uint32_t alarmStartMs = 0;
+
+        if (aEnabled && timeOkk && !aFired && !aRunning &&
+            timeinfo.tm_hour == aHour && timeinfo.tm_min == aMin) {
+            xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+            alarmRunning = true;
+            xSemaphoreGive(AlarmMutex);
+            aRunning = true;
+            alarmStartMs = millis();
         }
 
-        // Stop sound when alarm is dismissed (alarmRunning goes false via button)
-        if (!aRunning && alarmSoundActive) {
-            music.stopPlayAudio();          // stop the looping melody
-            music.stopPlayTone();           // stop any tone that might be playing
-            alarmSoundActive = false;
-        }
-
-        // Reset alarmFired when minute advances past the alarm minute
-        // stop alarm after 3 minutes of play
-        if (timeinfo.tm_hour != aHour || timeinfo.tm_min == aMin + alarmDurationMins) {
+        // auto-stop after the duration
+        if (aRunning && millis() - alarmStartMs >= (uint32_t)alarmDurationMins * 60000UL) {
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             alarmRunning = false;
-            alarmFired   = true;   // prevent re-fire this minute
-            xSemaphoreGive(AlarmMutex); 
+            alarmFired = true;
+            xSemaphoreGive(AlarmMutex);
+            aRunning = false;
+        }
+
+        // re-arm once the clock leaves the alarm minute
+        if (aFired && timeOkk && (timeinfo.tm_hour != aHour || timeinfo.tm_min != aMin)) {
+            xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+            alarmFired = false;
+            xSemaphoreGive(AlarmMutex);
         }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -534,6 +532,9 @@ void UITasks(void *pvParameters) {
                 strftime(timeStringBuff, sizeof(timeStringBuff), "%I:%M %p", &timeinfo);
                 k10.canvas->canvasText(timeStringBuff, 10, 5, 0xAAAAAA,  // greyed out = stale
                                        k10.canvas->eCNAndENFont24, 8, true);
+            } else {
+                k10.canvas->canvasText("!Time!", 10, 5, 0xFF0000,
+                                       k10.canvas->eCNAndENFont24, 6, true);
             }
             k10.canvas->canvasDrawBitmap(190, 7, NOWIFIICON_WIDTH, NOWIFIICON_HEIGHT, NoWifiIcon);
         }
@@ -685,7 +686,7 @@ void setup() {
     ledcSetup(2, 5000, 8);  // channel 0, 5 KHz, 8-bit resolution
     ledcAttachPin(BackLED, 2);  // attach pin to channel 0
 
-    // ── AHT sensor ───────────────────────────────────────────────────────
+    // ── AHT sensor ──────────────────────────────────────x─────────────────
     if (!aht.begin()) Serial.println("AHT10/AHT20 not found");
 
     // ── Tasks ─────────────────────────────────────────────────────────────
