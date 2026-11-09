@@ -17,6 +17,7 @@
 #include "lightIcon.h"
 #include "fanIcon.h"
 #include "ACIcon.h"
+#include <soc/gpio_struct.h> // Native ESP32-S3 GPIO register access for fan ISR
 
 Adafruit_AHTX0 aht;
 WiFiManager wm;
@@ -36,6 +37,7 @@ int maxLightIntensity = 15; // more than 15 lux the screen will be at full brigh
 
 ASR   asr;
 Music music;
+Music alarmMusic; // Dedicated player so voice feedback cannot overwrite the alarm melody
 
 // IR Data ─────────────────────────────────────────────────────────────────────────────
 const uint16_t kIrLed = P0; // this pin was soldered with the IR LED on the back of the board
@@ -49,7 +51,7 @@ uint16_t AC_OFFrawData[197] = {6094, 7330,  618, 1654,  620, 1650,  614, 1650,  
 #define RightTopButton    eP6
 #define RightBottomButton eP8
 #define TriacLight        eP9
-#define TriacFan          eP10
+#define TriacFan          18   // Native ESP32-S3 GPIO18; camera removed (CAM_D6)
 //#define BaclLED           eLCD_BLK    //using this pin blocks voice, idk why
 uint8_t fanSpeed = 4; // fan speed changes from 0 to 4
 
@@ -59,15 +61,13 @@ static volatile Page currentPage = PAGE_MAIN;
 int pageSwitchPressTime = 1000; // 1 second press on the mode button changes to next page
 
 // Alarm state ───────────────────────────────────────────────────────────────
-static volatile int  alarmHour    = 6;  // default alarm time 6:00 AM, can be changed via buttons on the alarm page
-static volatile int  alarmMinute  = 0;
+static volatile int  alarmHour    = 5;  // default alarm time 5:30 AM, can be changed via buttons on the alarm page
+static volatile int  alarmMinute  = 30;
 static volatile bool alarmEnabled = true;
 static volatile bool alarmFired   = false;
 static volatile bool alarmRunning = false;
-// Local variable to track whether we already started the alarm sound
-static bool alarmSoundActive = false;
-// Alarm timeout
-int alarmDurationMins = 60; // 60 minutes
+// Alarm timeout; the built-in ringtone loops until dismissed or one hour elapses.
+int alarmDurationMins = 30; // 30 minutes
 
 // Shared appliance state ────────────────────────────────────────────────────
 static volatile bool TriacLightState = false;
@@ -103,41 +103,133 @@ void toggleFan() {
     xSemaphoreGive(stateMutex);
 }
 
-void RunFanSpeed(uint8_t speed){
-    static bool optoState = false;  //must be static
-    uint16_t optoOnTime;  // Time optocoupler in on
-    uint16_t optoOffTime;  // Time optocoupler is off 
+// ── FAN SPEED CONTROL: GPIO8 ZCD + GPIO18 hardware-timed TRIAC firing ──────
+// GPIO8 and GPIO18 are NATIVE ESP32-S3 pins (not K10 eP8/eP10).
+// The K10 camera must remain disconnected: GPIO8=CAM_D0, GPIO18=CAM_D6.
+// Arduino-ESP32 2.x timer API is used (matching ledcSetup elsewhere in this file).
+// The MOC3021 LED must be driven by a suitable external transistor/driver.
+#define FAN_ZCD_GPIO 8
 
-    static unsigned long lastToggle = 0;
-    unsigned long now = millis();
+// Bangladesh: 50 Hz mains -> 10,000 microseconds per HALF-cycle.
+static const uint32_t FAN_HALF_CYCLE_US   = 10000UL;
+static const uint32_t FAN_ZCD_MIN_GAP_US  = 7000UL;  // reject spurious ZCD edges
+static const uint32_t FAN_ZCD_TIMEOUT_US  = 30000UL; // missing ZCD => no gate drive
+static const uint32_t FAN_GATE_PULSE_US   = 1200UL;  // gate drive for 1.2 ms
+static const uint32_t FAN_TICK_US         = 100UL;   // 100-us hardware timer tick
+static const uint32_t FAN_MAX_LATE_US     = 500UL;   // do not fire a badly late pulse
+static const uint32_t FAN_GATE_GPIO_MASK = (1UL << TriacFan); // GPIO18 < 32
 
-    switch (speed) {
-        case 0: //off
-            digital_write(TriacFan, LOW); // fully off
-            return;
-        case 1: //low
-             optoOnTime = 200;
-             optoOffTime = 300;  
-            break;
-        case 2: //medium
-            optoOnTime = 300;
-            optoOffTime = 200;
-            break;
-        case 3: //high
-            optoOnTime = 400;
-            optoOffTime = 120;
-            break;
-        case 4: //full on
-            digital_write(TriacFan, HIGH);
-            return;
+// Set firing angles for speeds 1..3. Later = lower effective motor voltage.
+// TUNE THESE THREE VALUES for your particular fan; they are not RPM settings.
+static const uint32_t FAN_DELAY_LOW_US    = FAN_HALF_CYCLE_US * 60UL / 100UL; // 6000us, 108 deg
+static const uint32_t FAN_DELAY_MED_US    = FAN_HALF_CYCLE_US * 40UL / 100UL; // 4000us,  72 deg
+static const uint32_t FAN_DELAY_HIGH_US   = FAN_HALF_CYCLE_US * 20UL / 100UL; // 2000us,  36 deg
+
+// 32-bit variables are atomically read/written on the ESP32-S3.
+// Use the same spinlock to read the crossing timestamp and count consistently.
+static portMUX_TYPE fanZcdMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t fanLastCrossUs = 0;
+static volatile uint32_t fanCrossCount  = 0;
+static volatile uint8_t  fanRequestedSpeed = 0; // safe OFF until ButtonTasks runs
+static hw_timer_t *fanPhaseTimer = nullptr;
+
+// Called on each zero-crossing rising edge (once per AC HALF-cycle).
+// Never perform I2C, Serial printing, delays or long computations here.
+void IRAM_ATTR onFanZeroCross() {
+    const uint32_t now = micros();
+    portENTER_CRITICAL_ISR(&fanZcdMux);
+    if ((uint32_t)(now - fanLastCrossUs) >= FAN_ZCD_MIN_GAP_US) {
+        fanLastCrossUs = now;
+        ++fanCrossCount;
     }
-    long interval = optoState ? optoOnTime : optoOffTime;
+    portEXIT_CRITICAL_ISR(&fanZcdMux);
+}
 
-    if (now - lastToggle >= interval && speed != 4) {
-        lastToggle = now;
-        optoState = !optoState;
-        digital_write(TriacFan, optoState ? HIGH : LOW); // Toggle the fan state
+// Runs once per 100 us from an ESP32-S3 hardware timer, independent of
+// display refresh, buttons, Wi-Fi, and FreeRTOS task scheduling.
+// The GPIO18 output is written DIRECTLY (no I2C calls in an ISR).
+void IRAM_ATTR onFanPhaseTimer() {
+    static uint32_t handledCross = 0;
+    static uint32_t pulseStartUs = 0;
+    static uint8_t  lastSpeed = 0;
+    static bool     firedThisHalfCycle = true;
+    static bool     gateHigh = false;
+
+    uint32_t crossingUs, crossCount;
+    portENTER_CRITICAL_ISR(&fanZcdMux);
+    crossingUs = fanLastCrossUs;
+    crossCount = fanCrossCount;
+    portEXIT_CRITICAL_ISR(&fanZcdMux);
+
+    const uint32_t now = micros();
+    const uint32_t elapsed = (uint32_t)(now - crossingUs);
+    const uint8_t speed = fanRequestedSpeed;
+
+    // Fail OFF if the fan is disabled or the ZCD disappears.
+    if (speed == 0 || speed > 4 || crossCount == 0 ||
+        elapsed > FAN_ZCD_TIMEOUT_US) {
+        if (gateHigh) GPIO.out_w1tc = FAN_GATE_GPIO_MASK;
+        gateHigh = false;
+        firedThisHalfCycle = true;
+        handledCross = crossCount;
+        lastSpeed = speed;
+        return;
     }
+
+    // Do not accidentally issue a partial-cycle pulse when speeds change.
+    if (speed != lastSpeed) {
+        if (gateHigh) GPIO.out_w1tc = FAN_GATE_GPIO_MASK;
+        gateHigh = false;
+        firedThisHalfCycle = true;
+        handledCross = crossCount;
+        lastSpeed = speed;
+        if (speed != 4) return; // phase-controlled modes begin next half-cycle
+    }
+
+    // Speed 4: continuous optotriac LED drive, as in the original code.
+    // ZCD timeout above still shuts the LED off when synchronization is lost.
+    if (speed == 4) {
+        if (!gateHigh) GPIO.out_w1ts = FAN_GATE_GPIO_MASK;
+        gateHigh = true;
+        handledCross = crossCount;
+        firedThisHalfCycle = true;
+        return;
+    }
+
+    // Reset pulse state on a new half-cycle.
+    if (crossCount != handledCross) {
+        if (gateHigh) GPIO.out_w1tc = FAN_GATE_GPIO_MASK;
+        gateHigh = false;
+        handledCross = crossCount;
+        firedThisHalfCycle = false;
+    }
+
+    // Gate pulse is short; main TRIAC conducts until its current reaches zero.
+    if (gateHigh && (uint32_t)(now - pulseStartUs) >= FAN_GATE_PULSE_US) {
+        GPIO.out_w1tc = FAN_GATE_GPIO_MASK;
+        gateHigh = false;
+    }
+
+    uint32_t delayUs = FAN_DELAY_HIGH_US;
+    if (speed == 1)      delayUs = FAN_DELAY_LOW_US;
+    else if (speed == 2) delayUs = FAN_DELAY_MED_US;
+
+    // One gate pulse per half-cycle, at the chosen phase angle.
+    if (!firedThisHalfCycle && elapsed >= delayUs) {
+        firedThisHalfCycle = true;
+        if (elapsed <= delayUs + FAN_MAX_LATE_US) {
+            GPIO.out_w1ts = FAN_GATE_GPIO_MASK;
+            gateHigh = true;
+            pulseStartUs = now;
+        }
+    }
+}
+
+// Called by the EXISTING ButtonTasks fan-control section.
+// No busy waiting: ISR-based timing keeps working while other tasks run.
+// speed: 0=OFF, 1=LOW, 2=MEDIUM, 3=HIGH, 4=FULL.
+void RunFanSpeed(uint8_t speed) {
+    fanRequestedSpeed = (fanPhaseTimer != nullptr && speed <= 4) ? speed : 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,25 +317,25 @@ void Configure_WIFI() {
 void VoiceTasks(void *pvParameters) {
     while (true) {
         if (asr.isWakeUp()) {
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
             asr._wakeUp = false;
         }
         if (asr.isDetectCmdID(0+1)) {
             asr._isDetectCmdID = 0;
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
             toggleLight();
         } else if (asr.isDetectCmdID(1+1)) {
             asr._isDetectCmdID = 0;
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
             toggleFan();
         } else if (asr.isDetectCmdID(2+1)) {
             asr._isDetectCmdID = 0;
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
             toggleAC();
         }
         else if (asr.isDetectCmdID(3+1)) {
             asr._isDetectCmdID = 0;
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             currentPage = PAGE_ALARM;
             xSemaphoreGive(stateMutex);
@@ -251,7 +343,7 @@ void VoiceTasks(void *pvParameters) {
         }
         else if (asr.isDetectCmdID(4+1)) {
             asr._isDetectCmdID = 0;
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             currentPage = PAGE_MAIN;
             xSemaphoreGive(stateMutex);
@@ -259,7 +351,7 @@ void VoiceTasks(void *pvParameters) {
         }
         else if (asr.isDetectCmdID(5+1)) {
             asr._isDetectCmdID = 0;
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             fanSpeed = 4; // full speed
             xSemaphoreGive(stateMutex);
@@ -267,12 +359,21 @@ void VoiceTasks(void *pvParameters) {
         }
         else if (asr.isDetectCmdID(6+1)) {
             asr._isDetectCmdID = 0;
-            music.playMusic(Melodies::BA_DING, OnceInBackground);
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
             xSemaphoreTake(stateMutex, portMAX_DELAY);
             fanSpeed = 1; // low speed
             xSemaphoreGive(stateMutex);
             Serial.println("Fan set to low speed via voice command");
         }
+        else if (asr.isDetectCmdID(7+1)) {
+            asr._isDetectCmdID = 0;
+            if (!alarmRunning) music.playMusic(Melodies::BA_DING, OnceInBackground);
+            xSemaphoreTake(stateMutex, portMAX_DELAY);
+            fanSpeed = 2; // medium speed
+            xSemaphoreGive(stateMutex);
+            Serial.println("Fan set to medium speed via voice command");
+        }
+
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -301,6 +402,24 @@ void ButtonTasks(void *pvParameters) {
         bool pressedRightBottom = curRightBottom && !prevRightBottom;
         bool releasedLeftTop = !curLeftTop &&  prevLeftTop;
 
+        // ALARM: Any button PRESS dismisses the ringtone immediately.
+        // Consume that press, so dismissing an alarm cannot also toggle an appliance,
+        // edit the alarm setting, or switch pages. Works even with screen off.
+        bool dismissedAlarm = false;
+        if (pressedLeftTop || pressedLeftBottom || pressedRightTop || pressedRightBottom) {
+            xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+            if (alarmRunning) {
+                alarmRunning = false;
+                alarmFired = true; // prevent retrigger during the current alarm minute
+                dismissedAlarm = true;
+            }
+            xSemaphoreGive(AlarmMutex);
+            if (dismissedAlarm) {
+                lbHeld = false; // suppress the later LeftTop release/long-press action
+                Serial.println("Alarm dismissed by button");
+            }
+        }
+
         Page page;
         xSemaphoreTake(stateMutex, portMAX_DELAY);
             page = currentPage;
@@ -312,10 +431,10 @@ void ButtonTasks(void *pvParameters) {
 
         //When buttons pressed
         //turn display on if it is off
-        if ((pressedLeftBottom || pressedRightBottom || pressedLeftTop || pressedRightTop) && dutyCopy == 0) {
+        if (!dismissedAlarm && (pressedLeftBottom || pressedRightBottom || pressedLeftTop || pressedRightTop) && dutyCopy == 0) {
             setBacklight(maxLightIntensity); // turn on to max brightness on button press if currently off for better visibility of UI during interaction, will auto-dim after 2 seconds based on ambient light
         }
-        else{
+        else if (!dismissedAlarm){
             // ── LeftBottomButton ─────────────────────────────────────────────────
             // AC functionality in main page and alarm toggle in alarm page
             if (pressedLeftBottom) {
@@ -375,16 +494,7 @@ void ButtonTasks(void *pvParameters) {
                 }
             }
             // short press action (only if not long-pressed): toggle alarm if on alarm page, change fan speed if on main page
-            if (releasedLeftTop) {
-                // Dismiss alarm if running (check before page-toggle)
-                xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-                bool running = alarmRunning;
-                if (running) {
-                    alarmRunning = false;   //stop alarm
-                    alarmFired   = true;   // prevent re-fire this minute
-                }
-                xSemaphoreGive(AlarmMutex);
-
+            if (releasedLeftTop && lbHeld) {
                 //change speed of fan at short presses when fan is on.
                 if (page == PAGE_MAIN && TriacFanState == true && !lbLongFired) {
                     xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -428,16 +538,15 @@ void ButtonTasks(void *pvParameters) {
 //Task: AlarmTasks
 // ─────────────────────────────────────────────────────────────────────────────
 void AlarmTasks(void *pvParameters) {
-    struct tm timeinfo;          // local copy, not shared
-    bool alarmSoundActive = false; // local to this task — no race
-    while (true) {
-        bool timeOkk = false;
-        if(WiFi.status() == WL_CONNECTED) {
-            timeOkk = getLocalTime(&timeinfo, 0);  // ← 0ms timeout, never blocks
-        }
+    struct tm timeinfo = {}; // initialized, so debug output is safe before NTP sync
+    bool alarmSoundActive = false; // owned by this task
+    uint32_t alarmStartMs = 0;
 
-        // ── Snapshot alarm state ──────────────────────────────────────────
-        //Serial.println("AlarmTasks: Checking alarm...");
+    while (true) {
+        // The ESP32 keeps its synchronized clock running even after WiFi disconnects.
+        // This also returns false if the clock has not synchronized since boot.
+        bool timeOkk = getLocalTime(&timeinfo, 0);
+
         xSemaphoreTake(AlarmMutex, portMAX_DELAY);
         int  aHour    = alarmHour;
         int  aMin     = alarmMinute;
@@ -446,40 +555,59 @@ void AlarmTasks(void *pvParameters) {
         bool aRunning = alarmRunning;
         xSemaphoreGive(AlarmMutex);
 
-        //serial print for debugging alarm logic
         Serial.printf("Alarm check: timeOk=%d enabled=%d fired=%d running=%d "
-        "now=%02d:%02d alarm=%02d:%02d sound=%d\n",
-        timeOkk, aEnabled, aFired, aRunning,
-        timeinfo.tm_hour, timeinfo.tm_min,
-        aHour, aMin, alarmSoundActive);
+                      "now=%02d:%02d alarm=%02d:%02d sound=%d\n",
+                      timeOkk, aEnabled, aFired, aRunning,
+                      timeOkk ? timeinfo.tm_hour : -1,
+                      timeOkk ? timeinfo.tm_min : -1,
+                      aHour, aMin, alarmSoundActive);
 
-        // ── Check alarm ───────────────────────────────────────────────────
-          static uint32_t alarmStartMs = 0;
-
+        // Start once when the valid local clock reaches the selected minute.
         if (aEnabled && timeOkk && !aFired && !aRunning &&
             timeinfo.tm_hour == aHour && timeinfo.tm_min == aMin) {
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
-            alarmRunning = true;
+            if (alarmEnabled && !alarmFired && !alarmRunning) {
+                alarmRunning = true;
+                aRunning = true;
+                alarmStartMs = millis();
+                Serial.println("Alarm triggered");
+            }
             xSemaphoreGive(AlarmMutex);
-            aRunning = true;
-            alarmStartMs = millis();
         }
 
-        // auto-stop after the duration
-        if (aRunning && millis() - alarmStartMs >= (uint32_t)alarmDurationMins * 60000UL) {
+        // Keep ringing for 60 minutes unless dismissed by a button.
+        if (aRunning && (uint32_t)(millis() - alarmStartMs) >=
+                            (uint32_t)alarmDurationMins * 60000UL) {
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             alarmRunning = false;
-            alarmFired = true;
+            alarmFired   = true;
             xSemaphoreGive(AlarmMutex);
-            aRunning = false;
+            Serial.println("Alarm stopped: one-hour timeout");
         }
 
-        // re-arm once the clock leaves the alarm minute
-        if (aFired && timeOkk && (timeinfo.tm_hour != aHour || timeinfo.tm_min != aMin)) {
+        // Re-arm for the next day after the scheduled clock minute has passed.
+        if (aFired && timeOkk &&
+            (timeinfo.tm_hour != aHour || timeinfo.tm_min != aMin)) {
             xSemaphoreTake(AlarmMutex, portMAX_DELAY);
             alarmFired = false;
             xSemaphoreGive(AlarmMutex);
         }
+
+        // Start / stop the ACTUAL audio (previous code only changed alarmRunning).
+        xSemaphoreTake(AlarmMutex, portMAX_DELAY);
+        bool shouldRing = alarmRunning;
+        xSemaphoreGive(AlarmMutex);
+
+        if (shouldRing && !alarmSoundActive) {
+            alarmMusic.playMusic(Melodies::JUMP_UP, ForeverInBackground);
+            alarmSoundActive = true;
+            Serial.println("Alarm ringtone started");
+        } else if (!shouldRing && alarmSoundActive) {
+            alarmMusic.stopPlayTone();
+            alarmSoundActive = false;
+            Serial.println("Alarm ringtone stopped");
+        }
+
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
@@ -546,7 +674,7 @@ void UITasks(void *pvParameters) {
             // k10.canvas->canvasText(" [LIGHT]",   3, 0xFFFFFF);
             // k10.canvas->canvasText("  [FAN] (" + String(fanSpeed) + ")",  5, 0xFFFFFF);
             // k10.canvas->canvasText("      [AC]", 7, 0xFFFFFF);
-            k10.canvas->canvasText("[" + String(fanSpeed) + "]", 210, 101, 0xFFFFFF, k10.canvas->eCNAndENFont24, 11, true);
+            k10.canvas->canvasText(" " + String(fanSpeed), 210, 101, 0xFFFFFF, k10.canvas->eCNAndENFont24, 11, true);
             k10.canvas->canvasDrawBitmap(16, 43, LIGHT_ICON_WIDTH, LIGHT_ICON_HEIGHT, light_icon);
             k10.canvas->canvasDrawBitmap(16, 93, FAN_ICON_WIDTH, FAN_ICON_HEIGHT, FAN_icon);
             k10.canvas->canvasDrawBitmap(16, 143, AC_ICON_WIDTH, AC_ICON_HEIGHT, AC_icon);
@@ -662,8 +790,9 @@ void setup() {
     asr.addASRCommand(2+1, const_cast<char*>("AC"));
     asr.addASRCommand(3+1, const_cast<char*>("Show Alarm"));
     asr.addASRCommand(4+1, const_cast<char*>("Hide Alarm"));
-    asr.addASRCommand(5+1, const_cast<char*>("Fan Full Speed"));
-    asr.addASRCommand(6+1, const_cast<char*>("Fan Low Speed"));
+    asr.addASRCommand(5+1, const_cast<char*>("Full Speed"));
+    asr.addASRCommand(6+1, const_cast<char*>("Zero Speed"));
+    asr.addASRCommand(7+1, const_cast<char*>("Medium Speed"));
 
 
     // ── GPIO ──────────────────────────────────────────────────────────────
@@ -672,9 +801,25 @@ void setup() {
     pinMode(RightTopButton,   INPUT_PULLDOWN);
     pinMode(RightBottomButton,INPUT_PULLDOWN);
     pinMode(TriacLight, OUTPUT);
-    pinMode(TriacFan,   OUTPUT);
+    pinMode(TriacFan,   OUTPUT); // native ESP32-S3 GPIO18
     digital_write(TriacLight, LOW);
-    digital_write(TriacFan,   LOW);
+    digitalWrite(TriacFan, LOW); // native GPIO; do NOT use K10 digital_write()
+
+    // Fan: periodic 100-us hardware timer for deterministic phase firing.
+    // ESP32-S3 has four timers; timer index 3 is reserved here for the fan.
+    // This is Arduino-ESP32 2.x syntax (same core as the existing ledcSetup).
+    fanPhaseTimer = timerBegin(3, 80, true); // 80-MHz APB / 80 = 1 MHz
+    if (fanPhaseTimer != nullptr) {
+        timerAttachInterrupt(fanPhaseTimer, &onFanPhaseTimer, true);
+        timerAlarmWrite(fanPhaseTimer, FAN_TICK_US, true);
+        timerAlarmEnable(fanPhaseTimer);
+        pinMode(FAN_ZCD_GPIO, INPUT); // ZCD already provides logic-level edges
+        attachInterrupt(digitalPinToInterrupt(FAN_ZCD_GPIO),
+                        onFanZeroCross, RISING);
+    } else {
+        // Safety: fan remains OFF if timer allocation fails.
+        Serial.println("ERROR: Fan phase timer failed; fan output disabled");
+    }
 
     // ── Display ───────────────────────────────────────────────────────────
     k10.initScreen(screen_dir);
